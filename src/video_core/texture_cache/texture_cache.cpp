@@ -42,6 +42,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     critical_gc_samplers = max_samplers * 15 / 16;
 
     // Set up garbage collection parameters.
+    UpdateMemoryThresholds();
+}
+
+void TextureCache::UpdateMemoryThresholds() {
     if (!instance.CanReportMemoryUsage()) {
         trigger_gc_memory = 0;
         pressure_gc_memory = DEFAULT_PRESSURE_GC_MEMORY;
@@ -49,7 +53,11 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         return;
     }
 
-    const s64 device_local_memory = static_cast<s64>(instance.GetTotalMemoryBudget());
+    // The budget reported by the driver shrinks as other applications claim memory, and the
+    // emulator itself is not allowed to allocate past it (VMA is asked to stay within budget).
+    // Recomputing the limits from the live value keeps the collector ahead of the ceiling instead
+    // of relying on a snapshot taken at startup.
+    const s64 device_local_memory = static_cast<s64>(instance.GetCurrentMemoryBudget());
     const s64 min_spacing_expected = device_local_memory - 1_GB;
     const s64 min_spacing_critical = device_local_memory - 512_MB;
     const s64 mem_threshold = std::min<s64>(device_local_memory, TARGET_GC_THRESHOLD);
@@ -60,10 +68,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     const s64 min_critical_floor =
         std::clamp<s64>(device_local_memory / 2, 512_MB, DEFAULT_CRITICAL_GC_MEMORY);
     pressure_gc_memory = static_cast<u64>(
-        std::max<s64>(std::min(device_local_memory - min_vacancy_expected, min_spacing_expected),
+        std::max<s64>(std::min<s64>(device_local_memory - min_vacancy_expected, min_spacing_expected),
                       min_pressure_floor));
     critical_gc_memory = static_cast<u64>(
-        std::max<s64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
+        std::max<s64>(std::min<s64>(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       min_critical_floor));
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
 }
@@ -1072,9 +1080,18 @@ void TextureCache::GarbageCollectSamplers() {
 }
 
 void TextureCache::RunGarbageCollector() {
+    UpdateMemoryThresholds();
     GarbageCollectImages();
     GarbageCollectSamplers();
     ++gc_tick;
+    if (gc_tick % 120 == 0) {
+        LOG_INFO(Render,
+                 "TEXCACHE tick {}: device in use {} MB, budget {} MB, limits trigger/pressure/"
+                 "critical {} / {} / {} MB, images {}",
+                 gc_tick, total_used_memory >> 20, instance.GetCurrentMemoryBudget() >> 20,
+                 trigger_gc_memory >> 20, pressure_gc_memory >> 20, critical_gc_memory >> 20,
+                 slot_images.Size());
+    }
 }
 
 void TextureCache::DeleteImage(ImageId image_id) {

@@ -466,6 +466,10 @@ public:
         return total_memory_budget;
     }
 
+    /// Returns the memory budget the driver reports right now. Unlike GetTotalMemoryBudget this
+    /// follows changes in what other applications are using.
+    [[nodiscard]] u64 GetCurrentMemoryBudget() const;
+
     /// Determines if a format is supported for a set of feature flags.
     [[nodiscard]] bool IsFormatSupported(vk::Format format, vk::FormatFeatureFlags2 flags) const;
 

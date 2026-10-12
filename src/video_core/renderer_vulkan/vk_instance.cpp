@@ -778,6 +778,31 @@ void Instance::CollectToolingInfo() const {
     }
 }
 
+u64 Instance::GetCurrentMemoryBudget() const {
+    if (!supports_memory_budget) {
+        return total_memory_budget;
+    }
+    vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
+    vk::PhysicalDeviceMemoryProperties2 props = {
+        .pNext = &memory_budget_props,
+    };
+    physical_device.getMemoryProperties2(&props);
+
+    u64 total_budget = 0;
+    u64 total_usage = 0;
+    for (const size_t heap : valid_heaps) {
+        total_budget += memory_budget_props.heapBudget[heap];
+        total_usage += memory_budget_props.heapUsage[heap];
+    }
+    if (!IsIntegrated()) {
+        // Same reserve as the startup calculation, but based on the budget of this moment.
+        const u64 system_memory = std::min<u64>(total_budget / 8, 1_GB);
+        return total_budget - system_memory;
+    }
+    const s64 available_memory = static_cast<s64>(total_budget - total_usage);
+    return static_cast<u64>(std::max<s64>(available_memory - 8_GB, static_cast<s64>(2_GB)));
+}
+
 u64 Instance::GetDeviceMemoryUsage() const {
     vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
     vk::PhysicalDeviceMemoryProperties2 props = {

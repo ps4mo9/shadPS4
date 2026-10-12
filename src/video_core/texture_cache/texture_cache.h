@@ -274,6 +274,9 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
+    /// Recomputes the garbage collection memory limits from the budget the driver reports now.
+    void UpdateMemoryThresholds();
+
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;
