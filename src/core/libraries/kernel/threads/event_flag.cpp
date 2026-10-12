@@ -8,6 +8,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/sampling_profiler.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
 #include "pthread.h"

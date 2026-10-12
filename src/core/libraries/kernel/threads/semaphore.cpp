@@ -10,6 +10,7 @@
 #include "core/libraries/kernel/sync/semaphore.h"
 
 #include "common/logging/log.h"
+#include "common/sampling_profiler.h"
 #include "common/slot_vector.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/orbis_error.h"
