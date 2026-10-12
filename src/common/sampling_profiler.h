@@ -60,17 +60,29 @@ inline void Sample(const char* name, u32 every = 1, u32 max_logs = 12) {
     if (every > 1 && (n % every) != 0) {
         return;
     }
+    if (n % 500 == 0) {
+        LOG_INFO(Core, "PROFILE-COUNT {} #{}", name, n);
+    }
     if (site->logged.fetch_add(1) >= max_logs) {
         return;
     }
 #if defined(_WIN32)
-    void* frames[MaxFrames] = {};
-    const USHORT count = RtlCaptureStackBackTrace(1, MaxFrames, frames, nullptr);
+    // Windows unwinding cannot walk guest frames (they have no unwind info), so scan the stack
+    // conservatively instead: guest return addresses are plain values on the current stack.
+    // Guest modules are mapped below 4 GB, while the emulator and host DLLs are not.
+    constexpr u64 GuestLow = 0x10000;
+    constexpr u64 GuestHigh = 0x100000000ull;
+    const u64* sp = reinterpret_cast<const u64*>(__builtin_frame_address(0));
     std::string line;
-    for (USHORT i = 0; i < count; i++) {
-        line += fmt::format("{:#x} ", reinterpret_cast<uintptr_t>(frames[i]));
+    int found = 0;
+    for (int i = 0; i < 4096 && found < 16; i++) {
+        const u64 v = sp[i];
+        if (v >= GuestLow && v < GuestHigh) {
+            line += fmt::format("{:#x} ", v);
+            found++;
+        }
     }
-    LOG_INFO(Core, "PROFILE {} #{} frames: {}", name, n, line);
+    LOG_INFO(Core, "PROFILE {} #{} stack({}): {}", name, n, found, line);
 #else
     LOG_INFO(Core, "PROFILE {} #{} (no backtrace)", name, n);
 #endif
