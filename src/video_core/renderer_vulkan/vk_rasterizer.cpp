@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/debug.h"
+#include "common/frame_stats.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -183,6 +184,8 @@ void Rasterizer::EliminateFastClear() {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
+    Common::FrameStats::draws++;
+    Common::FrameStats::Timer draw_timer{Common::FrameStats::draw_ns};
 
     scheduler.PopPendingOperations();
 
@@ -318,6 +321,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
+    Common::FrameStats::dispatches++;
 
     scheduler.PopPendingOperations();
 
@@ -352,6 +356,7 @@ void Rasterizer::DispatchDirect() {
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
+    Common::FrameStats::dispatches++;
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
@@ -408,6 +413,8 @@ void Rasterizer::OnFence() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
+    Common::FrameStats::bind_resources++;
+    Common::FrameStats::Timer bind_timer{Common::FrameStats::bind_resources_ns};
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
         return false;
@@ -755,6 +762,9 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 }
 
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
+                              u32& binding_index) {
+    Common::FrameStats::bind_buffers++;
+    Common::FrameStats::Timer buf_timer{Common::FrameStats::bind_buffers_ns};
                              Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
     for (const auto& desc : stage.buffers) {
@@ -851,6 +861,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
+    Common::FrameStats::bind_textures++;
+    Common::FrameStats::Timer tex_timer{Common::FrameStats::bind_textures_ns};
     const u32 first_image_idx = image_infos.size();
     // To emulate storing to explicit mip levels, build a descriptor array with each mip level.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;

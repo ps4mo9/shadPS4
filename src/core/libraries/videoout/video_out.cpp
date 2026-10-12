@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/elf_info.h"
+#include "common/frame_stats.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/libs.h"
@@ -162,6 +163,7 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
     if (flipMode != 1) {
         LOG_WARNING(Lib_VideoOut, "flipmode = {}", flipMode);
     }
+    Common::FrameStats::OnFlip();
 
     if (bufferIndex < -1 || bufferIndex > 15) {
         LOG_ERROR(Lib_VideoOut, "Invalid bufferIndex = {}", bufferIndex);
