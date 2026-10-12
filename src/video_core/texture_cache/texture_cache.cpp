@@ -57,23 +57,15 @@ void TextureCache::UpdateMemoryThresholds() {
     // emulator itself is not allowed to allocate past it (VMA is asked to stay within budget).
     // Recomputing the limits from the live value keeps the collector ahead of the ceiling instead
     // of relying on a snapshot taken at startup.
+    //
+    // The limits are fractions of the budget rather than absolute values: the usage reported by
+    // the driver is what this process holds, and the driver refuses an allocation as soon as it
+    // reaches the budget, so a title that allocates in bursts (streaming loads of several GB) has
+    // to be kept well below it, with room left for allocations that are still in flight.
     const s64 device_local_memory = static_cast<s64>(instance.GetCurrentMemoryBudget());
-    const s64 min_spacing_expected = device_local_memory - 1_GB;
-    const s64 min_spacing_critical = device_local_memory - 512_MB;
-    const s64 mem_threshold = std::min<s64>(device_local_memory, TARGET_GC_THRESHOLD);
-    const s64 min_vacancy_expected = (6 * mem_threshold) / 10;
-    const s64 min_vacancy_critical = (2 * mem_threshold) / 10;
-    const s64 min_pressure_floor =
-        std::clamp<s64>(device_local_memory / 4, 256_MB, DEFAULT_PRESSURE_GC_MEMORY);
-    const s64 min_critical_floor =
-        std::clamp<s64>(device_local_memory / 2, 512_MB, DEFAULT_CRITICAL_GC_MEMORY);
-    pressure_gc_memory = static_cast<u64>(
-        std::max<s64>(std::min<s64>(device_local_memory - min_vacancy_expected, min_spacing_expected),
-                      min_pressure_floor));
-    critical_gc_memory = static_cast<u64>(
-        std::max<s64>(std::min<s64>(device_local_memory - min_vacancy_critical, min_spacing_critical),
-                      min_critical_floor));
-    trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    trigger_gc_memory = static_cast<u64>(device_local_memory / 4);
+    pressure_gc_memory = static_cast<u64>(device_local_memory / 2);
+    critical_gc_memory = static_cast<u64>((device_local_memory * 7) / 10);
 }
 
 TextureCache::~TextureCache() = default;
