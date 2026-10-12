@@ -175,8 +175,9 @@ s32 PS4_SYSV_ABI sceKernelAioSubmitReadCommands(OrbisKernelAioRWRequest req[], s
         // Debug: failed reads make streaming titles retry forever; report them loudly.
         if (ret < 0) {
             LOG_ERROR(Core,
-                      "PROFILE AioRead FAILED fd={} buf={:#x} nbyte={:#x} offset={:#x} ret={}",
-                      req[i].fd, req[i].buf, req[i].nbyte, req[i].offset, ret);
+                      "PROFILE AioRead FAILED fd={} buf={} nbyte={:#x} offset={:#x} ret={}",
+                      req[i].fd, fmt::ptr(req[i].buf), static_cast<u64>(req[i].nbyte),
+                      static_cast<u64>(req[i].offset), ret);
             Common::Profiler::Sample("AioReadFailed", 1, 8);
         } else {
             Common::Profiler::Sample("AioReadOk", 40, 8);
