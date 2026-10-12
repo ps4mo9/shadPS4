@@ -732,6 +732,28 @@ static constexpr std::array formats{
     // 5_9_9_9
     CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format5_9_9_9, AmdGpu::NumberFormat::Float,
                             vk::Format::eE5B9G9R9UfloatPack32),
+    // GB_GR / BG_RG: packed two 8-bit channels with swapped ordering (channel order is
+    // handled by the T# component mapping, so map them to the plain two-channel formats).
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Unorm,
+                            vk::Format::eR8G8Unorm),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Snorm,
+                            vk::Format::eR8G8Snorm),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Uint,
+                            vk::Format::eR8G8Uint),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Sint,
+                            vk::Format::eR8G8Sint),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Srgb,
+                            vk::Format::eR8G8Srgb),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Unorm,
+                            vk::Format::eR8G8Unorm),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Snorm,
+                            vk::Format::eR8G8Snorm),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Uint,
+                            vk::Format::eR8G8Uint),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Sint,
+                            vk::Format::eR8G8Sint),
+    CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Srgb,
+                            vk::Format::eR8G8Srgb),
     // BC1
     CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBc1, AmdGpu::NumberFormat::Unorm,
                             vk::Format::eBc1RgbaUnormBlock),

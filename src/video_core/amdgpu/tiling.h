@@ -156,7 +156,7 @@ constexpr u32 GetMicroTileThickness(ArrayMode array_mode) {
     case ArrayMode::Array3DTiledXThick:
         return 8;
     default:
-        UNREACHABLE_MSG("Unknown array mode = {}", u32(array_mode));
+        return 1;
     }
 }
 
@@ -234,7 +234,8 @@ constexpr ArrayMode GetArrayMode(TileMode tile_mode) {
     case TileMode::DisplayLinearGeneral:
         return ArrayMode::ArrayLinearGeneral;
     default:
-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
+        // Unknown/reserved tile mode: assume the most common 2D thin layout.
+        return ArrayMode::Array2DTiledThin1;
     }
 }
 
@@ -273,7 +274,8 @@ constexpr MicroTileMode GetMicroTileMode(TileMode tile_mode) {
     case TileMode::Thick3DXThick:
         return MicroTileMode::Thick;
     default:
-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
+        // Unknown/reserved tile mode: assume thin micro tiling.
+        return MicroTileMode::Thin;
     }
 }
 
