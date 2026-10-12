@@ -117,8 +117,18 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
-    ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
-               vk::to_string(vk::Result{result}));
+    if (result != VK_SUCCESS) {
+        // Descriptors coming from some titles can carry parameters Vulkan rejects. Log what was
+        // requested and leave the image object invalid instead of aborting the emulator.
+        LOG_ERROR(Render_Vulkan,
+                  "Failed allocating image: format={} extent={}x{}x{} mips={} layers={} "
+                  "samples={} usage={:#x} error={}",
+                  vk::to_string(image_ci.format), image_ci.extent.width, image_ci.extent.height,
+                  image_ci.extent.depth, image_ci.mipLevels, image_ci.arrayLayers,
+                  vk::to_string(image_ci.samples), static_cast<u32>(image_ci.usage),
+                  vk::to_string(vk::Result{result}));
+        return;
+    }
     image = vk::Image{unsafe_image};
     size_bytes = alloc_info.size;
 }

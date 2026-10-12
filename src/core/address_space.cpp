@@ -587,7 +587,13 @@ struct AddressSpace::Impl {
 
         const VAddr virtual_end = virtual_addr + size;
         auto it = --regions.upper_bound(virtual_addr);
-        ASSERT_MSG(it != regions.end(), "addr {:#x} out of bounds", virtual_addr);
+        if (it == regions.end()) {
+            // Some titles ask for protection of addresses that were never mapped (garbage in
+            // the GPU command stream). Skip the request instead of aborting the emulator.
+            LOG_ERROR(Core, "Protect: address {:#x} size {:#x} is out of bounds, skipping",
+                      virtual_addr, size);
+            return;
+        }
         for (; it->first < virtual_end; it++) {
             if (!it->second.is_mapped) {
                 continue;
