@@ -217,9 +217,12 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         }
     }
 
-    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
+    // Reads whose flat buffer offset could not be resolved (offset 0) can only be served through
+    // the dynamic path at runtime. The global setting may therefore not turn that path off for
+    // shaders that depend on it, otherwise those reads would return unrelated flat buffer data.
+    if (!EmulatorSettings.IsDirectMemoryAccessEnabled() &&
+        info.readconst_types == Info::ReadConstType::None) {
         info.uses_dma = false;
-        info.readconst_types = Info::ReadConstType::None;
     }
 
     if (info.uses_dma) {

@@ -559,8 +559,33 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     case IR::Opcode::BitFieldUExtract:
         ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
         return true;
+    case IR::Opcode::Phi: {
+        // A phi can select between descriptor offsets depending on the path taken. The walker
+        // generated below runs as a flat function without the shader's control flow, so a phi can
+        // only be resolved when all of its operands agree. Otherwise the entry is left
+        // unflattened: the shader then resolves that read at runtime through the dynamic path
+        // (see CollectShaderInfoPass).
+        const IR::Value& first = inst->Arg(0);
+        for (size_t i = 1; i < inst->NumArgs(); i++) {
+            const IR::Value arg = inst->Arg(i);
+            const bool same =
+                arg.Type() == first.Type() &&
+                (arg.IsImmediate() ? first.IsImmediate() && arg.U32() == first.U32()
+                                   : !first.IsImmediate() && arg.Inst() == first.Inst());
+            if (!same) {
+                LOG_DEBUG(Render_Recompiler,
+                          "Phi with differing operands used as an SRT offset, keeping the read "
+                          "dynamic");
+                return false;
+            }
+        }
+        return ComputeOffset(c, reg, pass_info, first);
+    }
     default:
-        LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
+        // Instructions like ReadLane cannot be evaluated here; the access is left unflattened and
+        // resolved dynamically instead of failing the whole walk.
+        LOG_DEBUG(Render_Recompiler,
+                  "SRT offset depends on {} which cannot be flattened, keeping the read dynamic",
                   magic_enum::enum_name(inst->GetOpcode()));
         return false;
     }
