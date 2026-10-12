@@ -26,6 +26,8 @@ namespace VideoCore {
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
 static constexpr size_t NULL_INDEX_BUFFER_SIZE = 16;
 static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
+/// Residency allocations at or above this size are backed by host memory instead of video memory.
+static constexpr u64 HOST_SPILL_THRESHOLD = 512_MB;
 constexpr std::optional<u32> CmaskColorExpandedValue(u32 num_samples) {
     switch (num_samples) {
     case 1:
@@ -97,6 +99,27 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
                        reqs.memoryTypeBits)
             .value();
+    // Host visible memory that is not device local, used for allocations that are too large to be
+    // worth keeping in the video memory budget.
+    bool host_type_found = false;
+    for (u32 i = 0; i < instance.GetMemoryProperties().memoryTypeCount; ++i) {
+        if (((reqs.memoryTypeBits >> i) & 1) == 0) {
+            continue;
+        }
+        const auto flags = instance.GetMemoryProperties().memoryTypes[i].propertyFlags;
+        const bool host_visible = bool(flags & vk::MemoryPropertyFlagBits::eHostVisible);
+        const bool device_local = bool(flags & vk::MemoryPropertyFlagBits::eDeviceLocal);
+        if (host_visible && !device_local) {
+            arena_host_memory_type_index = i;
+            host_type_found = true;
+            break;
+        }
+    }
+    if (!host_type_found) {
+        arena_host_memory_type_index = arena_memory_type_index;
+    }
+    LOG_INFO(Render, "Arena memory types: device local {}, host spill {}", arena_memory_type_index,
+             arena_host_memory_type_index);
 
     const u64 bda_pagetable_size =
         (blocks_per_arena_page * NUM_ARENA_PAGES) * sizeof(vk::DeviceAddress);
@@ -296,7 +319,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 }
 
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
-    u32 resident_blocks{};
+    u64 resident_blocks{};
     IntervalList bind_ranges;
     resident_ranges.ForEachGap(first_block, last_block + 1, [&](u64 start, u64 end) {
         resident_blocks += end - start;
@@ -307,25 +330,36 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         return;
     }
 
+    const u64 resident_bytes_total = static_cast<u64>(resident_blocks) << block_shift;
+    // A title can put a streaming buffer of several gigabytes behind a single command, which for
+    // a discrete GPU means an equally large copy in video memory. Such a range is not hot data,
+    // and taking it out of the video memory budget (which the driver enforces, refusing further
+    // allocations once reached) is cheaper than running out of memory mid load. Small allocations
+    // stay device local.
+    const bool spill_to_host = resident_bytes_total >= HOST_SPILL_THRESHOLD;
+    const u32 memory_type_index = spill_to_host ? arena_host_memory_type_index : arena_memory_type_index;
+
     const vk::MemoryAllocateFlagsInfo alloc_flags = {
         .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
     };
     const vk::MemoryAllocateInfo alloc_info = {
         .pNext = &alloc_flags,
-        .allocationSize = resident_blocks << block_shift,
-        .memoryTypeIndex = arena_memory_type_index,
+        .allocationSize = resident_bytes_total,
+        .memoryTypeIndex = memory_type_index,
     };
     const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
 
-    const u64 alloc_bytes = resident_blocks << block_shift;
+    const u64 alloc_bytes = resident_bytes_total;
     Common::FrameStats::resident_bytes.fetch_add(alloc_bytes);
     Common::FrameStats::resident_allocs.fetch_add(1);
     u64 largest = Common::FrameStats::resident_largest.load();
     while (alloc_bytes > largest &&
            !Common::FrameStats::resident_largest.compare_exchange_weak(largest, alloc_bytes)) {
     }
-    LOG_INFO(Render, "EnsureResident: allocating {} MB for {} ranges, total resident now {} MB",
-             alloc_bytes >> 20, bind_ranges.Size(), Common::FrameStats::resident_bytes.load() >> 20);
+    LOG_INFO(Render,
+             "EnsureResident: allocating {} MB for {} ranges in {} memory, total resident now {} MB",
+             alloc_bytes >> 20, bind_ranges.Size(), spill_to_host ? "host" : "device",
+             Common::FrameStats::resident_bytes.load() >> 20);
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =

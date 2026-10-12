@@ -166,6 +166,9 @@ private:
     IntervalList<Backing> resident_ranges;
 
     u32 arena_memory_type_index{};
+    /// Memory type used for large residency allocations, which are backed by host memory so that
+    /// streaming buffers of several gigabytes do not consume the video memory budget.
+    u32 arena_host_memory_type_index{};
     u32 block_size{};
     u32 block_shift{};
     u32 blocks_per_arena_page{};
