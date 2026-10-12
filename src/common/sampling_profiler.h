@@ -12,16 +12,10 @@
 #include <string>
 #include <fmt/format.h>
 #include "common/logging/log.h"
-
-#if defined(_WIN32)
-#include <windows.h>
-extern "C" NTSYSAPI USHORT NTAPI RtlCaptureStackBackTrace(ULONG FramesToSkip, ULONG FramesToCapture,
-                                                          PVOID* BackTrace, PULONG BackTraceHash);
-#endif
+#include "common/types.h"
 
 namespace Common::Profiler {
 
-constexpr int MaxFrames = 20;
 constexpr int MaxSites = 16;
 
 struct Site {
@@ -84,7 +78,7 @@ inline void Sample(const char* name, u32 every = 1, u32 max_logs = 12) {
     }
     LOG_INFO(Core, "PROFILE {} #{} stack({}): {}", name, n, found, line);
 #else
-    LOG_INFO(Core, "PROFILE {} #{} (no backtrace)", name, n);
+    LOG_INFO(Core, "PROFILE {} #{} (no stack scan)", name, n);
 #endif
 }
 
