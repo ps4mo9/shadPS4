@@ -445,7 +445,11 @@ vk::ComponentSwizzle ComponentSwizzle(AmdGpu::CompSwizzle comp_swizzle) {
     case AmdGpu::CompSwizzle::Alpha:
         return vk::ComponentSwizzle::eA;
     default:
-        UNREACHABLE();
+        // Values 2 and 3 are reserved in the GCN component swizzle encoding. Titles do hand them
+        // over occasionally; keep the component as it is instead of aborting the emulator.
+        LOG_WARNING(Render_Vulkan, "Unknown component swizzle {}, using identity",
+                    static_cast<u32>(comp_swizzle));
+        return vk::ComponentSwizzle::eIdentity;
     }
 }
 
@@ -1192,8 +1196,15 @@ vk::SampleCountFlagBits RawNumSamples(u32 num_samples) {
         return vk::SampleCountFlagBits::e8;
     case 16:
         return vk::SampleCountFlagBits::e16;
-    default:
-        UNREACHABLE();
+    default: {
+        // Round unknown sample counts down to a supported power of two instead of aborting.
+        u32 clamped = 1;
+        for (u32 samples = 2; samples <= 16 && samples <= num_samples; samples *= 2) {
+            clamped = samples;
+        }
+        LOG_WARNING(Render_Vulkan, "Unknown sample count {}, using {}", num_samples, clamped);
+        return RawNumSamples(clamped);
+    }
     }
 }
 
