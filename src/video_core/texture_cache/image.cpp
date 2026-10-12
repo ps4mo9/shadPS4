@@ -249,14 +249,18 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         // In case of partial transition, we need to change the specified subresources only.
         // Otherwise all subresources need to be set to the same state so we can use a full
         // resource transition for the next time.
+        // Ranges coming from titles can exceed the image's own mip/layer counts; keep the loops
+        // inside the state table that was sized for this image.
         const u32 start_mip = needs_partial_transition ? subres_range->base.level : u16{0};
-        const u32 end_mip = needs_partial_transition
-                                ? subres_range->base.level + subres_range->extent.levels
-                                : info.resources.levels;
+        const u32 end_mip = std::min<u32>(
+            needs_partial_transition ? subres_range->base.level + subres_range->extent.levels
+                                     : info.resources.levels,
+            info.resources.levels);
         const u32 start_layer = needs_partial_transition ? subres_range->base.layer : u16{0};
-        const u32 end_layer = needs_partial_transition
-                                  ? subres_range->base.layer + subres_range->extent.layers
-                                  : info.resources.layers;
+        const u32 end_layer = std::min<u32>(
+            needs_partial_transition ? subres_range->base.layer + subres_range->extent.layers
+                                     : info.resources.layers,
+            info.resources.layers);
         for (u32 mip = start_mip; mip < end_mip; ++mip) {
             for (u32 layer = start_layer; layer < end_layer; ++layer) {
                 // NOTE: these loops may produce a lot of small barriers.
