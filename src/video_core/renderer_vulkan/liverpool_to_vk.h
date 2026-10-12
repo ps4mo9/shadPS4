@@ -96,13 +96,24 @@ constexpr size_t GetSurfaceFormatTableIndex(AmdGpu::DataFormat data_format,
     return result;
 }
 
-constexpr vk::Format SurfaceFormat(AmdGpu::DataFormat data_format,
-                                   AmdGpu::NumberFormat num_format) noexcept {
+inline vk::Format SurfaceFormat(AmdGpu::DataFormat data_format,
+                                AmdGpu::NumberFormat num_format) noexcept {
+    const u32 data_fmt = static_cast<u32>(data_format);
+    const u32 num_fmt = static_cast<u32>(num_format);
+    if (data_fmt >= (1u << amd_gpu_data_format_bit_size) ||
+        num_fmt >= (1u << amd_gpu_number_format_bit_size)) {
+        LOG_ERROR(Render_Vulkan, "Invalid surface format {}/{} used, falling back", data_fmt,
+                  num_fmt);
+        return vk::Format::eR8G8B8A8Unorm;
+    }
     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
-    bool found =
-        result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
-    ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
-               static_cast<u32>(num_format));
+    if (result == vk::Format::eUndefined && data_format != AmdGpu::DataFormat::FormatInvalid) {
+        // Some titles hand over descriptors with formats the table does not cover. Log it and
+        // keep going with a safe format instead of aborting the emulator.
+        LOG_ERROR(Render_Vulkan, "Unknown data_format={} and num_format={}, falling back",
+                  data_fmt, num_fmt);
+        return vk::Format::eR8G8B8A8Unorm;
+    }
     return result;
 }
 
