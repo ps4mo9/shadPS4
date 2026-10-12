@@ -295,10 +295,14 @@ constexpr auto hw_pipe_interleave = 256u;
 
 constexpr std::pair<u32, u32> GetMacroTileExtents(AmdGpu::TileMode tile_mode, u32 bpp,
                                                   u32 num_samples, bool alt) {
-    ASSERT(num_samples > 0 && num_samples <= 8);
-    const auto samples_log = std::bit_width(num_samples) - 1;
-    const auto row = u32(tile_mode) * 5;
-    const auto column = std::bit_width(bpp) - 4; // bpps are 8, 16, 32, 64, 128
+    // Descriptors from some titles carry invalid sample counts, bit depths and tile modes.
+    // Clamp them so the table lookup stays in range instead of aborting the emulator.
+    const u32 samples = (num_samples >= 1 && num_samples <= 8) ? num_samples : 1;
+    const u32 clamped_bpp = (bpp >= 8 && bpp <= 128) ? bpp : 32;
+    const u32 mode = u32(tile_mode) < 32 ? u32(tile_mode) : 0;
+    const auto samples_log = std::bit_width(samples) - 1;
+    const auto row = mode * 5;
+    const auto column = std::bit_width(clamped_bpp) - 4; // bpps are 8, 16, 32, 64, 128
     return (alt ? macro_tile_extents_alt : macro_tile_extents)[samples_log][row + column];
 }
 
