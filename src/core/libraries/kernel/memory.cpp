@@ -14,6 +14,7 @@
 #include "common/elf_info.h"
 #include "common/error.h"
 #include "common/logging/log.h"
+#include "common/sampling_profiler.h"
 #include "common/scope_exit.h"
 #include "common/singleton.h"
 #include "core/libraries/kernel/kernel.h"
@@ -81,6 +82,9 @@ s32 PS4_SYSV_ABI sceKernelAllocateDirectMemory(s64 searchStart, s64 searchEnd, u
     }
 
     *physAddrOut = static_cast<s64>(phys_addr);
+
+    // Debug: sample the guest call chain of allocations to find runaway loops.
+    Common::Profiler::Sample("AllocateDirectMemory", 25, 12);
 
     LOG_INFO(Kernel_Vmm,
              "searchStart = {:#x}, searchEnd = {:#x}, len = {:#x}, "

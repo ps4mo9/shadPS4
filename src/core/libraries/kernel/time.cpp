@@ -6,6 +6,7 @@
 
 #include "common/assert.h"
 #include "common/native_clock.h"
+#include "common/sampling_profiler.h"
 #include "common/thread.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/orbis_error.h"
@@ -94,6 +95,8 @@ s32 PS4_SYSV_ABI posix_usleep(u32 microseconds) {
 }
 
 s32 PS4_SYSV_ABI sceKernelUsleep(u32 microseconds) {
+    // Debug: usleep is the spin primitive of waiting loops; sample who calls it.
+    Common::Profiler::Sample("Usleep", 5000, 10);
     const OrbisKernelTimespec ts = {
         .tv_sec = microseconds / 1'000'000,
         .tv_nsec = (microseconds % 1'000'000) * 1'000,

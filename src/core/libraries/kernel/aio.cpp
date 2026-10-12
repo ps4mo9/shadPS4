@@ -7,6 +7,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/logging/log.h"
+#include "common/sampling_profiler.h"
 #include "core/libraries/kernel/equeue.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
@@ -123,6 +124,7 @@ s32 PS4_SYSV_ABI sceKernelAioWaitRequests(OrbisKernelAioSubmitId id[], s32 num, 
     if (state == nullptr) {
         return ORBIS_KERNEL_ERROR_EFAULT;
     }
+    Common::Profiler::Sample("AioWaitRequests", 20, 10);
     u32 timer = 0;
     s32 timeout = 0;
     s32 completion = 0;
@@ -169,6 +171,16 @@ s32 PS4_SYSV_ABI sceKernelAioSubmitReadCommands(OrbisKernelAioRWRequest req[], s
     for (s32 i = 0; i < size; i++) {
 
         s64 ret = sceKernelPread(req[i].fd, req[i].buf, req[i].nbyte, req[i].offset);
+
+        // Debug: failed reads make streaming titles retry forever; report them loudly.
+        if (ret < 0) {
+            LOG_ERROR(Core,
+                      "PROFILE AioRead FAILED fd={} buf={:#x} nbyte={:#x} offset={:#x} ret={}",
+                      req[i].fd, req[i].buf, req[i].nbyte, req[i].offset, ret);
+            Common::Profiler::Sample("AioReadFailed", 1, 8);
+        } else {
+            Common::Profiler::Sample("AioReadOk", 40, 8);
+        }
 
         if (ret < 0) {
             req[i].result->state = ORBIS_KERNEL_AIO_STATE_ABORTED;
