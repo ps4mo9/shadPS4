@@ -5,6 +5,7 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
+#include "common/frame_stats.h"
 #include "core/debug_state.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -315,6 +316,16 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         .memoryTypeIndex = arena_memory_type_index,
     };
     const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+
+    const u64 alloc_bytes = resident_blocks << block_shift;
+    Common::FrameStats::resident_bytes.fetch_add(alloc_bytes);
+    Common::FrameStats::resident_allocs.fetch_add(1);
+    u64 largest = Common::FrameStats::resident_largest.load();
+    while (alloc_bytes > largest &&
+           !Common::FrameStats::resident_largest.compare_exchange_weak(largest, alloc_bytes)) {
+    }
+    LOG_INFO(Render, "EnsureResident: allocating {} MB for {} ranges, total resident now {} MB",
+             alloc_bytes >> 20, bind_ranges.Size(), Common::FrameStats::resident_bytes.load() >> 20);
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
