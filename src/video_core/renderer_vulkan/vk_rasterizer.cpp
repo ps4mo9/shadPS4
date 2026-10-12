@@ -762,10 +762,9 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
 }
 
 void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
-                              u32& binding_index) {
+                             Shader::PushData& push_data) {
     Common::FrameStats::bind_buffers++;
     Common::FrameStats::Timer buf_timer{Common::FrameStats::bind_buffers_ns};
-                             Shader::PushData& push_data) {
     const u64 alignment = instance.StorageMinAlignment();
     for (const auto& desc : stage.buffers) {
         const auto src_access =
