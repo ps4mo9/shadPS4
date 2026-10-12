@@ -603,10 +603,14 @@ struct AddressSpace::Impl {
             const u64 range_size = std::min(region.base + region.size, virtual_end) - range_addr;
             DWORD old_flags{};
             if (!VirtualProtectEx(process, LPVOID(range_addr), range_size, new_flags, &old_flags)) {
-                UNREACHABLE_MSG(
-                    "Failed to change virtual memory protection for address {:#x}, size "
-                    "{:#x}, error {}",
-                    virtual_addr, size, Common::GetLastErrorMsg());
+                // A single request can cover a mix of valid and uncommitted ranges (stale or
+                // garbage addresses from the title). Protection changes are bookkeeping, so skip
+                // the failing range instead of aborting the emulator.
+                LOG_ERROR(Core,
+                          "Protect: failed to change protection for address {:#x}, size {:#x}, "
+                          "error {}, skipping",
+                          range_addr, range_size, Common::GetLastErrorMsg());
+                continue;
             }
         }
     }
