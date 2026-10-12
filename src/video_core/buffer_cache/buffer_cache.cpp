@@ -335,8 +335,12 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     // a discrete GPU means an equally large copy in video memory. Such a range is not hot data,
     // and taking it out of the video memory budget (which the driver enforces, refusing further
     // allocations once reached) is cheaper than running out of memory mid load. Small allocations
-    // stay device local.
-    const bool spill_to_host = resident_bytes_total >= HOST_SPILL_THRESHOLD;
+    // stay device local until the buffer cache has claimed half of the budget, after which new
+    // copies go to host memory instead.
+    const u64 resident_so_far = Common::FrameStats::resident_bytes.load();
+    const u64 spill_limit = instance.GetCurrentMemoryBudget() / 2;
+    const bool spill_to_host = resident_bytes_total >= HOST_SPILL_THRESHOLD ||
+                               resident_so_far + resident_bytes_total > spill_limit;
     const u32 memory_type_index = spill_to_host ? arena_host_memory_type_index : arena_memory_type_index;
 
     const vk::MemoryAllocateFlagsInfo alloc_flags = {
