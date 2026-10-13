@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "video_core/amdgpu/tiling.h"
 
 #include <magic_enum/magic_enum.hpp>
@@ -61,7 +62,8 @@ ArrayMode GetArrayMode(TileMode tile_mode) {
     case TileMode::DisplayLinearGeneral:
         return ArrayMode::ArrayLinearGeneral;
     default:
-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
+        LOG_WARNING(Render, "Unknown tile mode = {}, using a safe fallback", u32(tile_mode));
+        return ArrayMode::Array2DTiledThin1;
     }
 }
 
@@ -100,7 +102,8 @@ MicroTileMode GetMicroTileMode(TileMode tile_mode) {
     case TileMode::Thick3DXThick:
         return MicroTileMode::Thick;
     default:
-        UNREACHABLE_MSG("Unknown tile mode = {}", u32(tile_mode));
+        LOG_WARNING(Render, "Unknown tile mode = {}, using a safe fallback", u32(tile_mode));
+        return MicroTileMode::Thin;
     }
 }
 
@@ -277,7 +280,8 @@ u32 GetBankWidth(MacroTileMode mode) {
     case MacroTileMode::Mode_1x1_2_Dup3:
         return 1;
     default:
-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
+        LOG_WARNING(Render, "Unknown macro tile mode = {}, using a safe fallback", u32(mode));
+        return 1;
     }
 }
 
@@ -304,7 +308,8 @@ u32 GetBankHeight(MacroTileMode mode) {
     case MacroTileMode::Mode_1x8_16:
         return 8;
     default:
-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
+        LOG_WARNING(Render, "Unknown macro tile mode = {}, using a safe fallback", u32(mode));
+        return 1;
     }
 }
 
@@ -331,7 +336,8 @@ u32 GetNumBanks(MacroTileMode mode) {
     case MacroTileMode::Mode_1x1_16_Dup2:
         return 16;
     default:
-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
+        LOG_WARNING(Render, "Unknown macro tile mode = {}, using a safe fallback", u32(mode));
+        return 4;
     }
 }
 
@@ -357,7 +363,8 @@ u32 GetMacrotileAspect(MacroTileMode mode) {
     case MacroTileMode::Mode_1x4_16_Dup:
         return 4;
     default:
-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
+        LOG_WARNING(Render, "Unknown macro tile mode = {}, using a safe fallback", u32(mode));
+        return 1;
     }
 }
 
@@ -383,7 +390,8 @@ u32 GetAltBankHeight(MacroTileMode mode) {
     case MacroTileMode::Mode_1x4_16_Dup:
         return 4;
     default:
-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
+        LOG_WARNING(Render, "Unknown macro tile mode = {}, using a safe fallback", u32(mode));
+        return 1;
     }
 }
 
@@ -410,7 +418,8 @@ u32 GetAltNumBanks(MacroTileMode mode) {
     case MacroTileMode::Mode_1x8_16:
         return 16;
     default:
-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
+        LOG_WARNING(Render, "Unknown macro tile mode = {}, using a safe fallback", u32(mode));
+        return 4;
     }
 }
 
@@ -435,7 +444,8 @@ u32 GetAltMacrotileAspect(MacroTileMode mode) {
     case MacroTileMode::Mode_1x4_16_Dup:
         return 2;
     default:
-        UNREACHABLE_MSG("Unknown macro tile mode = {}", u32(mode));
+        LOG_WARNING(Render, "Unknown macro tile mode = {}, using a safe fallback", u32(mode));
+        return 1;
     }
 }
 
@@ -460,7 +470,8 @@ bool IsMacroTiled(ArrayMode array_mode) {
     case ArrayMode::ArrayPrt3DTiledThick:
         return true;
     default:
-        UNREACHABLE_MSG("Unknown array mode = {}", u32(array_mode));
+        LOG_WARNING(Render, "Unknown array mode = {}, using a safe fallback", u32(array_mode));
+        return true;
     }
 }
 
@@ -485,7 +496,8 @@ bool IsPrt(ArrayMode array_mode) {
     case ArrayMode::Array3DTiledXThick:
         return false;
     default:
-        UNREACHABLE_MSG("Unknown array mode = {}", u32(array_mode));
+        LOG_WARNING(Render, "Unknown array mode = {}, using a safe fallback", u32(array_mode));
+        return false;
     }
 }
 
@@ -511,7 +523,8 @@ u32 GetMicroTileThickness(ArrayMode array_mode) {
     case ArrayMode::Array3DTiledXThick:
         return 8;
     default:
-        UNREACHABLE_MSG("Unknown array mode = {}", u32(array_mode));
+        LOG_WARNING(Render, "Unknown array mode = {}, using a safe fallback", u32(array_mode));
+        return 1;
     }
 }
 
@@ -525,7 +538,8 @@ u32 GetPipeCount(PipeConfig pipe_cfg) {
     case PipeConfig::P16_32x32_8x16:
         return 16;
     default:
-        UNREACHABLE_MSG("Unknown pipe config = {}", u32(pipe_cfg));
+        LOG_WARNING(Render, "Unknown pipe config = {}, using a safe fallback", u32(pipe_cfg));
+        return 8;
     }
 }
 

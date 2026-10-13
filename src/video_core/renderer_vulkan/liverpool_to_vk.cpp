@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/number_utils.h"
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+
+#include <algorithm>
 
 #include <magic_enum/magic_enum.hpp>
 
@@ -574,6 +577,26 @@ std::span<const SurfaceFormatInfo> SurfaceFormats() {
         CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatInvalid, AmdGpu::NumberFormat::Ubscaled,
                                 vk::Format::eUndefined),
         // 8
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Unorm,
+                                vk::Format::eR8G8Unorm),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Snorm,
+                                vk::Format::eR8G8Snorm),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Uint,
+                                vk::Format::eR8G8Uint),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Sint,
+                                vk::Format::eR8G8Sint),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatGB_GR, AmdGpu::NumberFormat::Srgb,
+                                vk::Format::eR8G8Srgb),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Unorm,
+                                vk::Format::eR8G8Unorm),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Snorm,
+                                vk::Format::eR8G8Snorm),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Uint,
+                                vk::Format::eR8G8Uint),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Sint,
+                                vk::Format::eR8G8Sint),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::FormatBG_RG, AmdGpu::NumberFormat::Srgb,
+                                vk::Format::eR8G8Srgb),
         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format8, AmdGpu::NumberFormat::Unorm,
                                 vk::Format::eR8Unorm),
         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format8, AmdGpu::NumberFormat::Snorm,
@@ -748,11 +771,14 @@ static const size_t amd_gpu_number_format_bit_size = 4; // All values are under 
 
 static size_t GetSurfaceFormatTableIndex(AmdGpu::DataFormat data_format,
                                          AmdGpu::NumberFormat num_format) {
-    DEBUG_ASSERT(u32(data_format) < 1 << amd_gpu_data_format_bit_size);
-    DEBUG_ASSERT(u32(num_format) < 1 << amd_gpu_number_format_bit_size);
-    size_t result = static_cast<size_t>(num_format) |
-                    (static_cast<size_t>(data_format) << amd_gpu_number_format_bit_size);
-    return result;
+    // Descriptors can carry garbage; the table is only as wide as the valid format ranges, so
+    // clamp instead of reading out of bounds in release builds (the DEBUG_ASSERTs above compile
+    // away).
+    const size_t clamped_data_format =
+        std::min<size_t>(u32(data_format), (size_t{1} << amd_gpu_data_format_bit_size) - 1);
+    const size_t clamped_num_format =
+        std::min<size_t>(u32(num_format), (size_t{1} << amd_gpu_number_format_bit_size) - 1);
+    return clamped_num_format | (clamped_data_format << amd_gpu_number_format_bit_size);
 }
 
 static auto surface_format_table = []() constexpr {
@@ -771,10 +797,14 @@ static auto surface_format_table = []() constexpr {
 
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
-    bool found =
+    const bool found =
         result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
-    ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
-               static_cast<u32>(num_format));
+    if (!found) {
+        LOG_ERROR(Render_Vulkan,
+                  "Unknown data_format={} and num_format={}, falling back to RGBA8 unorm",
+                  static_cast<u32>(data_format), static_cast<u32>(num_format));
+        return vk::Format::eR8G8B8A8Unorm;
+    }
     return result;
 }
 
