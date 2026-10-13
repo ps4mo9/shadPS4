@@ -6,9 +6,7 @@
 #include <mutex>
 #include <SDL3/SDL_init.h>
 #include <cmrc/cmrc.hpp>
-#include <fmt/format.h>
 #include <imgui.h>
-#include <imgui/imgui_std.h>
 #include <queue>
 
 #define MINIMP3_IMPLEMENTATION
@@ -18,6 +16,7 @@
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/np/trophy_ui.h"
+#include "imgui/imgui_std.h"
 
 CMRC_DECLARE(res);
 namespace fs = std::filesystem;
@@ -264,7 +263,7 @@ void TrophyUI::Draw() {
         }
 
         // Displays the name of the trophy
-        const std::string combinedString = "Trophy earned!\n" + trophy_name;
+        const std::string combinedString = "Trophy earned!\n%s" + trophy_name;
         const float wrap_width =
             CalcWrapWidthForPos(GetCursorScreenPos(), (window_size.x - (60 * AdjustWidth)));
         SetWindowFontScale(1.2 * AdjustHeight);

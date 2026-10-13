@@ -689,7 +689,6 @@ void ToggleKeyInList(InputID input) {
 void ControllerOutput::ResetUpdate() {
     state_changed = false;
     new_button_state = false;
-    analog_source = false;
     *new_param = 0; // bruh
 }
 void ControllerOutput::AddUpdate(InputEvent event) {
@@ -715,7 +714,6 @@ void ControllerOutput::AddUpdate(InputEvent event) {
 
     } else if (axis != SDL_GAMEPAD_AXIS_INVALID) {
         *new_param = (event.active ? event.axis_value : 0) + *new_param;
-        analog_source |= event.input.type == InputType::Axis;
     }
 }
 
@@ -760,9 +758,7 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             rightjoystick_halfmode = new_button_state;
             break;
         case HOTKEY_RELOAD_INPUTS:
-            if (new_button_state) {
-                ParseInputConfig(std::string(Common::ElfInfo::Instance().GameSerial()));
-            }
+            ParseInputConfig(std::string(Common::ElfInfo::Instance().GameSerial()));
             break;
         case HOTKEY_FULLSCREEN:
             PushSDLEvent(SDL_EVENT_TOGGLE_FULLSCREEN);
@@ -795,26 +791,20 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             PushSDLEvent(SDL_EVENT_REMOVE_VIRTUAL_USER);
             break;
         case HOTKEY_VOLUME_UP:
-            if (new_button_state) {
-                EmulatorSettings.SetVolumeSlider(
-                    std::clamp(EmulatorSettings.GetVolumeSlider() + 10, 0, 500));
-                Overlay::ShowVolume();
-            }
+            EmulatorSettings.SetVolumeSlider(
+                std::clamp(EmulatorSettings.GetVolumeSlider() + 10, 0, 500));
+            Overlay::ShowVolume();
             break;
         case HOTKEY_VOLUME_DOWN:
-            if (new_button_state) {
-                EmulatorSettings.SetVolumeSlider(
-                    std::clamp(EmulatorSettings.GetVolumeSlider() - 10, 0, 500));
-                Overlay::ShowVolume();
-            }
+            EmulatorSettings.SetVolumeSlider(
+                std::clamp(EmulatorSettings.GetVolumeSlider() - 10, 0, 500));
+            Overlay::ShowVolume();
             break;
         case HOTKEY_QUIT:
             PushSDLEvent(SDL_EVENT_QUIT_DIALOG);
             break;
         case HOTKEY_OPEN_EMULATOR_SETTINGS:
-            if (new_button_state) {
-                ImGuiEmuSettings::OpenInGameSettingsDialog();
-            }
+            ImGuiEmuSettings::OpenInGameSettingsDialog();
             break;
         case HOTKEY_TOGGLE_FRIENDS:
             PushSDLEvent(SDL_EVENT_TOGGLE_FRIENDS);
@@ -842,7 +832,6 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             }
         };
         float multiplier = 1.0;
-        const bool smooth = !analog_source;
         Axis c_axis = GetAxisFromSDLAxis(axis);
         switch (c_axis) {
         case Axis::LeftX:
@@ -857,18 +846,18 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             break;
         case Axis::TriggerLeft:
             ApplyDeadzone(new_param, lefttrigger_deadzone[gamepad_index]);
-            controller->Axis(c_axis, GetAxis(0x0, 0x7f, *new_param), smooth);
+            controller->Axis(c_axis, GetAxis(0x0, 0x7f, *new_param));
             controller->Button(OrbisPadButtonDataOffset::L2, *new_param > 0x20);
             return;
         case Axis::TriggerRight:
             ApplyDeadzone(new_param, righttrigger_deadzone[gamepad_index]);
-            controller->Axis(c_axis, GetAxis(0x0, 0x7f, *new_param), smooth);
+            controller->Axis(c_axis, GetAxis(0x0, 0x7f, *new_param));
             controller->Button(OrbisPadButtonDataOffset::R2, *new_param > 0x20);
             return;
         default:
             break;
         }
-        controller->Axis(c_axis, GetAxis(-0x80, 0x7f, *new_param * multiplier), smooth);
+        controller->Axis(c_axis, GetAxis(-0x80, 0x7f, *new_param * multiplier));
     }
 }
 

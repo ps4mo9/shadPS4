@@ -16,23 +16,13 @@ static bool IsLoadShared(const IR::Inst& inst) {
 }
 
 static bool IsWriteShared(const IR::Inst& inst) {
-    const IR::Opcode opcode = inst.GetOpcode();
-    if (opcode >= IR::Opcode::SharedAtomicIAdd32 && opcode <= IR::Opcode::SharedAtomicCmpSwap64) {
-        return !inst.Flags<bool>();
-    }
-    return opcode == IR::Opcode::WriteSharedU16 || opcode == IR::Opcode::WriteSharedU32 ||
-           opcode == IR::Opcode::WriteSharedU64;
+    return inst.GetOpcode() == IR::Opcode::WriteSharedU16 ||
+           inst.GetOpcode() == IR::Opcode::WriteSharedU32 ||
+           inst.GetOpcode() == IR::Opcode::WriteSharedU64;
 }
 
 // Inserts barriers when a shared memory write and read occur in the same basic block.
-static void EmitBarrierInBlock(IR::Block* block, bool subgroup = false) {
-    const auto emit_barrier = [subgroup](IR::IREmitter& ir) {
-        if (subgroup) {
-            ir.SubgroupBarrier();
-        } else {
-            ir.Barrier();
-        }
-    };
+static void EmitBarrierInBlock(IR::Block* block) {
     enum class BarrierAction : u32 {
         None,
         BarrierOnWrite,
@@ -43,7 +33,7 @@ static void EmitBarrierInBlock(IR::Block* block, bool subgroup = false) {
         if (IsLoadShared(inst)) {
             if (action == BarrierAction::BarrierOnRead) {
                 IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
-                emit_barrier(ir);
+                ir.Barrier();
             }
             action = BarrierAction::BarrierOnWrite;
             continue;
@@ -51,103 +41,64 @@ static void EmitBarrierInBlock(IR::Block* block, bool subgroup = false) {
         if (IsWriteShared(inst)) {
             if (action == BarrierAction::BarrierOnWrite) {
                 IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
-                emit_barrier(ir);
+                ir.Barrier();
             }
             action = BarrierAction::BarrierOnRead;
         }
     }
     if (action != BarrierAction::None) {
         IR::IREmitter ir{*block, --block->end()};
-        emit_barrier(ir);
+        ir.Barrier();
     }
 }
 
 using NodeSet = std::unordered_set<const IR::Block*>;
-
-static void EmitBarrierAtBlockStart(IR::Block* block) {
-    auto insert_point = std::ranges::find_if_not(block->Instructions(), IR::IsPhi);
-    IR::IREmitter ir{*block, insert_point};
-    ir.Barrier();
-}
-
-static bool IsDivergent(const IR::U1& cond) {
-    return IR::BreadthFirstSearch(cond, [](IR::Inst* inst) -> std::optional<bool> {
-               if (inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
-                   inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationId) {
-                   return true;
-               }
-               return std::nullopt;
-           }) == true;
-}
 
 // Inserts a barrier after divergent conditional blocks to avoid undefined
 // behavior when some threads write and others read from shared memory.
 static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
                                     NodeSet& divergence_end, u32& divergence_depth) {
     const IR::U1 cond = data.if_node.cond;
-    if (IsDivergent(cond)) {
+    const auto is_divergent_cond =
+        IR::BreadthFirstSearch(cond, [](IR::Inst* inst) -> std::optional<bool> {
+            if (inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
+                inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationId) {
+                return true;
+            }
+            return std::nullopt;
+        });
+    if (is_divergent_cond) {
         if (divergence_depth == 0) {
-            EmitBarrierAtBlockStart(data.if_node.merge);
+            IR::Block* const merge = data.if_node.merge;
+            auto insert_point = std::ranges::find_if_not(merge->Instructions(), IR::IsPhi);
+            IR::IREmitter ir{*merge, insert_point};
+            ir.Barrier();
         }
         ++divergence_depth;
         divergence_end.emplace(data.if_node.merge);
     }
 }
 
-// A barrier inside a loop is invalid when different invocations leave on different iterations.
-// Mark such loops so their shared-memory synchronization can be deferred to the merge block.
-static NodeSet FindDivergentLoops(const IR::AbstractSyntaxList& syntax_list) {
-    NodeSet divergent_loops;
-    for (const IR::AbstractSyntaxNode& node : syntax_list) {
-        switch (node.type) {
-        case IR::AbstractSyntaxNode::Type::Repeat:
-            if (IsDivergent(node.data.repeat.cond)) {
-                divergent_loops.emplace(node.data.repeat.merge);
-            }
-            break;
-        case IR::AbstractSyntaxNode::Type::Break:
-            if (IsDivergent(node.data.break_node.cond)) {
-                divergent_loops.emplace(node.data.break_node.merge);
-            }
-            break;
-        default:
-            break;
-        }
-    }
-    return divergent_loops;
-}
-
 static constexpr u32 GcnSubgroupSize = 64;
 
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile) {
-    if (program.info.hw_stage != HwStage::Compute) {
+    if (program.info.stage != Stage::Compute) {
         return;
     }
-    const auto& cs_info = runtime_info.hw.cs;
+    const auto& cs_info = runtime_info.cs_info;
     const u32 shared_memory_size = cs_info.shared_memory_size;
     const u32 threadgroup_size =
         cs_info.workgroup_size[0] * cs_info.workgroup_size[1] * cs_info.workgroup_size[2];
-    if (shared_memory_size == 0) {
-        return;
-    }
     // The compiler can only omit barriers when the local workgroup size is the same as the HW
     // subgroup.
-    if (threadgroup_size != GcnSubgroupSize || !profile.needs_lds_barriers) {
-        // GCN waves can use shared memory between invocations without explicit barriers because
-        // they run in lockstep. Host compilers can reorder these accesses, so keep their order
-        // with subgroup memory barriers.
-        for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
-            if (node.type == IR::AbstractSyntaxNode::Type::Block) {
-                EmitBarrierInBlock(node.data.block, true);
-            }
-        }
+    if (shared_memory_size == 0 || threadgroup_size != GcnSubgroupSize ||
+        !profile.needs_lds_barriers) {
         return;
     }
     using Type = IR::AbstractSyntaxNode::Type;
     u32 divergence_depth{};
     NodeSet divergence_end;
-    const NodeSet divergent_loops = FindDivergentLoops(program.syntax_list);
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         if (node.type == Type::EndIf) {
             if (divergence_end.contains(node.data.end_if.merge)) {
@@ -159,18 +110,6 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
         // code.
         if (node.type == Type::If) {
             EmitBarrierInMergeBlock(node.data, divergence_end, divergence_depth);
-            continue;
-        }
-        if (node.type == Type::Loop && divergent_loops.contains(node.data.loop.merge)) {
-            ++divergence_depth;
-            continue;
-        }
-        if (node.type == Type::Repeat && divergent_loops.contains(node.data.repeat.merge)) {
-            ASSERT(divergence_depth > 0);
-            --divergence_depth;
-            if (divergence_depth == 0) {
-                EmitBarrierAtBlockStart(node.data.repeat.merge);
-            }
             continue;
         }
         if (node.type == Type::Block && divergence_depth == 0) {

@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
-#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -22,13 +20,13 @@
 #include "common/discord_rpc_handler.h"
 #endif
 #include "common/elf_info.h"
+#include "common/hack_features.h"
 #include "common/memory_patcher.h"
 #include "common/ntapi.h"
 #include "common/path_util.h"
 #include "common/polyfill_thread.h"
 #include "common/scm_rev.h"
 #include "common/singleton.h"
-#include "core/cpu_patches.h" // Windows static guest red-zone protection
 #include "core/debugger.h"
 #include "core/devtools/widget/module_list.h"
 #include "core/emulator_settings.h"
@@ -38,7 +36,6 @@
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/libs.h"
-#include "core/libraries/np/np_handler/np_handler.h"
 #include "core/libraries/np/np_trophy.h"
 #include "core/libraries/save_data/save_backup.h"
 #include "core/linker.h"
@@ -59,10 +56,6 @@
 #include <core/file_format/npbind.h>
 
 Frontend::WindowSDL* g_window = nullptr;
-
-namespace Libraries::Kernel {
-extern char const* g_environment[64];
-}
 
 namespace Core {
 
@@ -91,13 +84,6 @@ void Emulator::Shutdown() {
         return;
     }
     Common::Log::Flush();
-    Libraries::SaveData::Backup::StopThread();
-    Storage::DataBase::Instance().Close();
-    play_time_thread.request_stop();
-    if (play_time_thread.joinable()) {
-        play_time_thread.join();
-    }
-    UpdatePlayTime(Common::Singleton<Common::ElfInfo>::Instance()->GameSerial());
     if (controllers) {
         controllers->ResetLightbarColors();
         // need to give SDL time to do this before the runtime exits
@@ -278,9 +264,7 @@ std::map<s32, std::string> ExtractTrophies(std::string_view npbind_guest,
 }
 
 void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
-                   std::optional<std::filesystem::path> p_game_folder,
-                   std::vector<std::pair<std::filesystem::path, std::string>> mounts,
-                   std::vector<std::string> const& env_vars, bool append_log) {
+                   std::optional<std::filesystem::path> p_game_folder) {
     Common::SetCurrentThreadName("shadPS4:Main");
     if (waitForDebuggerBeforeRun) {
         Debugger::WaitForDebuggerAttach();
@@ -391,59 +375,63 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     Common::PSFAttributes psf_attributes{};
 
     if (auto psf_handle = mnt->Open("/app0/sce_sys/param.sfo", /*writable=*/false)) {
-        auto* param_sfo = Common::Singleton<PSF>::Instance();
-        ASSERT_MSG(param_sfo->Open(psf_handle), "Failed to open param.sfo");
-        param_sfo_exists = true;
+        std::vector<u8> psf_buf(psf_handle->Size());
+        if (psf_handle->Read(psf_buf.data(), psf_buf.size()) == static_cast<s64>(psf_buf.size())) {
+            auto* param_sfo = Common::Singleton<PSF>::Instance();
+            ASSERT_MSG(param_sfo->Open(psf_buf), "Failed to open param.sfo");
+            param_sfo_exists = true;
 
-        const auto content_id = param_sfo->GetString("CONTENT_ID");
-        const auto title_id = param_sfo->GetString("TITLE_ID");
-        if (content_id.has_value() && !content_id->empty()) {
-            id = std::string(*content_id, 7, 9);
-        } else if (title_id.has_value()) {
-            id = *title_id;
-        }
-        title = param_sfo->GetString("TITLE").value_or("Unknown title");
-        fw_version = param_sfo->GetInteger("SYSTEM_VER").value_or(0x4700000);
-        app_version = param_sfo->GetString("APP_VER").value_or("Unknown version");
-        if (const auto raw_attributes = param_sfo->GetInteger("ATTRIBUTE")) {
-            psf_attributes.raw = *raw_attributes;
-        }
-
-        // Extract sdk version from pubtool info.
-        std::string_view pubtool_info =
-            param_sfo->GetString("PUBTOOLINFO").value_or("Unknown value");
-        u64 sdk_ver_offset = pubtool_info.find("sdk_ver");
-
-        if (sdk_ver_offset == pubtool_info.npos) {
-            // Default to using firmware version if SDK version is not found.
-            sdk_version = fw_version;
-        } else {
-            // Increment offset to account for sdk_ver= part of string.
-            sdk_ver_offset += 8;
-            u64 sdk_ver_len = pubtool_info.find(",", sdk_ver_offset);
-            if (sdk_ver_len == pubtool_info.npos) {
-                // If there's no more commas, this is likely the last entry of pubtool info.
-                // Use string length instead.
-                sdk_ver_len = pubtool_info.size();
+            const auto content_id = param_sfo->GetString("CONTENT_ID");
+            const auto title_id = param_sfo->GetString("TITLE_ID");
+            if (content_id.has_value() && !content_id->empty()) {
+                id = std::string(*content_id, 7, 9);
+            } else if (title_id.has_value()) {
+                id = *title_id;
             }
-            sdk_ver_len -= sdk_ver_offset;
-            std::string sdk_ver_string = pubtool_info.substr(sdk_ver_offset, sdk_ver_len).data();
-            // Number is stored in base 16.
-            sdk_version = std::stoi(sdk_ver_string, nullptr, 16);
+            title = param_sfo->GetString("TITLE").value_or("Unknown title");
+            fw_version = param_sfo->GetInteger("SYSTEM_VER").value_or(0x4700000);
+            app_version = param_sfo->GetString("APP_VER").value_or("Unknown version");
+            if (const auto raw_attributes = param_sfo->GetInteger("ATTRIBUTE")) {
+                psf_attributes.raw = *raw_attributes;
+            }
+
+            // Extract sdk version from pubtool info.
+            std::string_view pubtool_info =
+                param_sfo->GetString("PUBTOOLINFO").value_or("Unknown value");
+            u64 sdk_ver_offset = pubtool_info.find("sdk_ver");
+
+            if (sdk_ver_offset == pubtool_info.npos) {
+                // Default to using firmware version if SDK version is not found.
+                sdk_version = fw_version;
+            } else {
+                // Increment offset to account for sdk_ver= part of string.
+                sdk_ver_offset += 8;
+                u64 sdk_ver_len = pubtool_info.find(",", sdk_ver_offset);
+                if (sdk_ver_len == pubtool_info.npos) {
+                    // If there's no more commas, this is likely the last entry of pubtool info.
+                    // Use string length instead.
+                    sdk_ver_len = pubtool_info.size();
+                }
+                sdk_ver_len -= sdk_ver_offset;
+                std::string sdk_ver_string =
+                    pubtool_info.substr(sdk_ver_offset, sdk_ver_len).data();
+                // Number is stored in base 16.
+                sdk_version = std::stoi(sdk_ver_string, nullptr, 16);
+            }
         }
     }
 
     EmulatorSettings.Load(id);
     // Switch to configured log
     Common::Log::Switch((!id.empty() && EmulatorSettings.IsLogSeparate()) ? id + ".log"
-                                                                          : "shad_log.txt",
-                        append_log);
+                                                                          : "shad_log.txt");
 
     auto guest_eboot_path = "/app0/" + eboot_name.generic_string();
 
     auto& game_info = Common::ElfInfo::Instance();
     game_info.initialized = true;
     game_info.game_serial = id;
+    Common::HackFeatures::Init(id);
     game_info.title = title;
     game_info.app_ver = app_version;
     game_info.firmware_ver = fw_version & 0xFFF00000;
@@ -459,8 +447,10 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
 
     game_info.game_folder = game_folder;
 
-    ASSERT_MSG(mnt->Exists(guest_eboot_path), "Guest app's main executable {} does not exist",
-               guest_eboot_path);
+    if (!mnt->Exists(guest_eboot_path)) {
+        LOG_CRITICAL(Loader, "eboot.bin does not exist: {}", guest_eboot_path);
+        std::quick_exit(0);
+    }
 
     LOG_INFO(Loader, "Starting shadps4 emulator v{} ", Common::g_version);
     LOG_INFO(Loader, "Revision {}", Common::g_scm_rev);
@@ -475,11 +465,6 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "General isDevKit: {}", EmulatorSettings.IsDevKit());
     LOG_INFO(Config, "General isConnectedToNetwork: {}", EmulatorSettings.IsConnectedToNetwork());
     LOG_INFO(Config, "General isShadNetEnabled: {}", EmulatorSettings.IsShadNetEnabled());
-#ifdef _WIN32
-    LOG_INFO(Config, "General isRedZonePatchingEnabled: {}",
-             EmulatorSettings.IsRedZonePatchingEnabled());
-#endif
-    LOG_INFO(Config, "General p2pPort: {}", EmulatorSettings.GetP2PPort());
     LOG_INFO(Config, "Log sync: {}", EmulatorSettings.IsLogSync());
     LOG_INFO(Config, "Log skipDuplicate: {}", EmulatorSettings.IsLogSkipDuplicate());
 #ifdef _WIN32
@@ -493,10 +478,6 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU shouldDumpShaders: {}", EmulatorSettings.IsDumpShaders());
     LOG_INFO(Config, "GPU vblankFrequency: {}", EmulatorSettings.GetVblankFrequency());
     LOG_INFO(Config, "GPU shouldCopyGPUBuffers: {}", EmulatorSettings.IsCopyGpuBuffers());
-#ifdef __linux__
-    LOG_INFO(Config, "GPU userfaultfdTracking: {}", EmulatorSettings.IsUserfaultfdTracking());
-#endif
-    LOG_INFO(Config, "GPU inlineFetchShader: {}", EmulatorSettings.IsInlineFetchShader());
     LOG_INFO(Config, "Vulkan gpuId: {}", EmulatorSettings.GetGpuId());
     LOG_INFO(Config, "Vulkan vkValidation: {}", EmulatorSettings.IsVkValidationEnabled());
     LOG_INFO(Config, "Vulkan vkValidationCore: {}", EmulatorSettings.IsVkValidationCoreEnabled());
@@ -546,14 +527,6 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     if (std::filesystem::exists(mods_folder) && !std::filesystem::is_empty(mods_folder)) {
         LOG_INFO(Loader, "Files found in game mods folder");
     }
-
-#ifdef _WIN32
-    // Enable red-zone patching if the setting is enabled
-    if (EmulatorSettings.IsRedZonePatchingEnabled()) {
-        WindowsGuestRedZoneProtection::SetActiveMode(
-            WindowsGuestRedZoneProtectionMode::StaticPatching);
-    }
-#endif
 
     // Create stdin/stdout/stderr
     Common::Singleton<FileSys::HandleTable>::Instance()->CreateStdHandles();
@@ -657,21 +630,9 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
     mnt->Mount(host_font2_dir, guest_font_dir);
 
-    for (auto const& mount_pair : mounts) {
-        LOG_INFO(Loader, "Mounting {} to {}", mount_pair.first.string(), mount_pair.second);
-        mnt->Mount(mount_pair.first, mount_pair.second);
-    }
-
     if (std::filesystem::is_empty(host_font_dir) || std::filesystem::is_empty(host_font2_dir)) {
         LOG_WARNING(Loader, "No dumped system fonts, expect missing text or instability");
     }
-
-    auto env_max = std::min<u64>(env_vars.size(), 63);
-    for (int i = 0; i < env_max; i++) {
-        LOG_INFO(Loader, "Env {:02}: {}", i, env_vars[i]);
-        Libraries::Kernel::g_environment[i] = env_vars[i].c_str();
-    }
-    Libraries::Kernel::g_environment[env_max] = nullptr;
 
     // Initialize kernel and library facilities.
     Libraries::InitHLELibs(&linker->GetHLESymbols());
@@ -699,6 +660,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
         play_time_thread = std::jthread([this, id](std::stop_token stop) {
             while (Common::StoppableTimedWait(stop, std::chrono::seconds(60))) {
                 UpdatePlayTime(id);
+                start_time = std::chrono::steady_clock::now();
             }
         });
     }
@@ -709,6 +671,9 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     while (window->IsOpen()) {
         window->WaitEvent();
     }
+
+    UpdatePlayTime(id);
+    Storage::DataBase::Instance().Close();
 
     std::quick_exit(0);
 }
@@ -761,6 +726,9 @@ void Emulator::Restart(std::filesystem::path eboot_path,
         args.push_back(MemoryPatcher::patch_file);
     }
 
+    args.push_back("--wait-for-pid");
+    args.push_back(std::to_string(Debugger::GetCurrentPid()));
+
     if (waitForDebuggerBeforeRun) {
         args.push_back("--wait-for-debugger");
     }
@@ -772,15 +740,8 @@ void Emulator::Restart(std::filesystem::path eboot_path,
         }
     }
 
-    Relaunch(std::move(args));
-}
-
-[[noreturn]] void Emulator::Relaunch(std::vector<std::string> args) {
-    const auto guest_args = std::find(args.begin(), args.end(), "--");
-    args.insert(guest_args, {"--wait-for-pid", std::to_string(Debugger::GetCurrentPid())});
-
-    LOG_INFO(Common, "Relaunching the emulator with args: {}", fmt::join(args, " "));
-    Libraries::Np::NpHandler::GetInstance().Shutdown();
+    LOG_INFO(Common, "Restarting the emulator with args: {}", fmt::join(args, " "));
+    Libraries::SaveData::Backup::StopThread();
     Common::Log::Shutdown();
 
     auto& ipc = IPC::Instance();
@@ -792,24 +753,23 @@ void Emulator::Restart(std::filesystem::path eboot_path,
         }
     }
 #if defined(_WIN32)
-    std::wstring cmdline;
+    std::string cmdline;
     // Emulator executable
-    const auto executable = Common::UTF8ToUTF16W(executableName);
-    cmdline += L"\"";
-    cmdline += executable;
-    cmdline += L"\"";
+    cmdline += "\"";
+    cmdline += executableName;
+    cmdline += "\"";
     for (const auto& arg : args) {
-        cmdline += L" \"";
-        cmdline += Common::UTF8ToUTF16W(arg);
-        cmdline += L"\"";
+        cmdline += " \"";
+        cmdline += arg;
+        cmdline += "\"";
     }
-    cmdline += L'\0';
+    cmdline += "\0";
 
-    STARTUPINFOW si{};
+    STARTUPINFOA si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    bool success = CreateProcessW(executable.c_str(), cmdline.data(), nullptr, nullptr, TRUE, 0,
-                                  nullptr, nullptr, &si, &pi);
+    bool success = CreateProcessA(nullptr, cmdline.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                                  nullptr, &si, &pi);
 
     if (!success) {
         std::cerr << "Failed to restart game: {}" << GetLastError() << std::endl;
@@ -818,7 +778,7 @@ void Emulator::Restart(std::filesystem::path eboot_path,
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-#else
+#elif defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)
     std::vector<char*> argv;
 
     // Emulator executable
@@ -839,16 +799,14 @@ void Emulator::Restart(std::filesystem::path eboot_path,
         std::cerr << "Failed to restart game: fork failed" << std::endl;
         std::quick_exit(1);
     }
+#else
+#error "Unsupported platform"
 #endif
 
     std::quick_exit(0);
 }
 
-void Emulator::UpdatePlayTime(const std::string_view serial) {
-    if (serial.empty() || start_time == std::chrono::steady_clock::time_point{}) {
-        return;
-    }
-
+void Emulator::UpdatePlayTime(const std::string& serial) {
     const auto user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
     const auto filePath = (user_dir / "play_time.txt").string();
 
@@ -858,10 +816,9 @@ void Emulator::UpdatePlayTime(const std::string_view serial) {
         return;
     }
 
-    const auto end_time = std::chrono::steady_clock::now();
-    const auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-    start_time = end_time;
-    const int total_seconds = static_cast<int>(duration.count());
+    auto end_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
+    int total_seconds = static_cast<int>(duration.count());
 
     std::vector<std::string> lines;
     std::string line;
@@ -895,15 +852,13 @@ void Emulator::UpdatePlayTime(const std::string_view serial) {
 
     std::string playTimeSaved = fmt::format("{:d}:{:02d}:{:02d}", hours, minutes, seconds);
 
-    const std::time_t last_time_played = std::time(nullptr);
-
     std::ofstream outfile(filePath, std::ios::trunc);
     bool lineUpdated = false;
     for (const auto& l : lines) {
         std::istringstream iss(l);
         std::string s;
         if (iss >> s && s == serial) {
-            outfile << fmt::format("{} {} {}\n", serial, playTimeSaved, last_time_played);
+            outfile << fmt::format("{} {}\n", serial, playTimeSaved);
             lineUpdated = true;
         } else {
             outfile << l << "\n";
@@ -911,10 +866,10 @@ void Emulator::UpdatePlayTime(const std::string_view serial) {
     }
 
     if (!lineUpdated) {
-        outfile << fmt::format("{} {} {}\n", serial, playTimeSaved, last_time_played);
+        outfile << fmt::format("{} {}\n", serial, playTimeSaved);
     }
 
-    LOG_INFO(Loader, "Playing time for {}: {} {}", serial, playTimeSaved, last_time_played);
+    LOG_INFO(Loader, "Playing time for {}: {}", serial, playTimeSaved);
 }
 
 } // namespace Core

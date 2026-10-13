@@ -11,29 +11,18 @@
 namespace Core::Loader {
 
 void SymbolsResolver::AddSymbol(const SymbolResolver& s, u64 virtual_addr) {
-    m_symbols.emplace_back(s, virtual_addr);
+    m_symbols.emplace_back(GenerateName(s), s.nidName, virtual_addr);
 }
 
-std::string_view SymbolsResolver::SymbolTypeToS(SymbolType sym_type) {
-    switch (sym_type) {
-    case SymbolType::Unknown:
-        return "Unknown";
-    case SymbolType::Function:
-        return "Function";
-    case SymbolType::Object:
-        return "Object";
-    case SymbolType::Tls:
-        return "Tls";
-    case SymbolType::NoType:
-        return "NoType";
-    default:
-        UNREACHABLE();
-    }
+std::string SymbolsResolver::GenerateName(const SymbolResolver& s) {
+    return fmt::format("{}#{}#{}#{}#{}", s.name, s.library, s.library_version, s.module,
+                       SymbolTypeToS(s.type));
 }
 
 const SymbolRecord* SymbolsResolver::FindSymbol(const SymbolResolver& s) const {
+    const std::string name = GenerateName(s);
     for (u32 i = 0; i < m_symbols.size(); i++) {
-        if (m_symbols[i].symbol == s) {
+        if (m_symbols[i].name == name) {
             return &m_symbols[i];
         }
     }
@@ -46,18 +35,13 @@ void SymbolsResolver::DebugDump(const std::filesystem::path& file_name) {
     Common::FS::IOFile f{file_name, Common::FS::FileAccessMode::Create,
                          Common::FS::FileType::TextFile};
     for (const auto& symbol : m_symbols) {
-        const auto id = symbol.symbol;
-        const auto aeronid = AeroLib::FindByNid(id.name.c_str());
+        const auto ids = Common::SplitString(symbol.name, '#');
+        const auto aeronid = AeroLib::FindByNid(ids.at(0).c_str());
         const auto nid_name = aeronid ? aeronid->name : "UNK";
         f.WriteString(fmt::format("0x{:<20x} {:<16} {:<60} {:<30} {:<2} {:<30} {:<10}\n",
-                                  symbol.virtual_address, id.name, nid_name, id.library,
-                                  id.library_version, id.module, SymbolTypeToS(id.type)));
+                                  symbol.virtual_address, ids.at(0), nid_name, ids.at(1), ids.at(2),
+                                  ids.at(3), ids.at(4)));
     }
-}
-
-bool SymbolResolver::operator==(SymbolResolver const& o) const {
-    // not checking the version and type as they're ignored on real hardware as well
-    return this->name == o.name && this->library == o.library && this->module == o.module;
 }
 
 } // namespace Core::Loader

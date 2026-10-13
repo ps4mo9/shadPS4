@@ -1,12 +1,13 @@
 //  SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 //  SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <bit>
-#include <mutex>
-#include <thread>
+#include "dimensions.h"
+
 #include "core/libraries/kernel/threads.h"
 #include "core/tls.h"
-#include "dimensions.h"
+
+#include <mutex>
+#include <thread>
 
 namespace Libraries::Usbd {
 

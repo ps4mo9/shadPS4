@@ -9,6 +9,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/backend/spirv/emit_spirv_per_vertex.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
@@ -22,9 +23,9 @@
 
 namespace Vulkan {
 
-using Shader::HwStage;
+using Shader::LogicalStage;
 using Shader::Output;
-using Shader::SwStage;
+using Shader::Stage;
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
@@ -87,44 +88,76 @@ static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsO
     return num_outputs;
 }
 
-const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStage l_stage) {
+const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalStage l_stage) {
     auto& info = runtime_infos[u32(l_stage)];
     const auto& regs = liverpool->regs;
     const auto BuildCommon = [&](const auto& program) {
-        info.props.fp_denorm_mode32 = program.settings.fp_denorm_mode32;
-        info.props.fp_denorm_mode16_64 = program.settings.fp_denorm_mode64;
-        info.props.fp_round_mode32 = program.settings.fp_round_mode32;
-        info.props.fp_round_mode16_64 = program.settings.fp_round_mode64;
-        info.props.num_allocated_vgprs = program.NumVgprs();
-        info.props.num_user_data = program.settings.num_user_regs;
-        info.props.num_input_vgprs = program.settings.vgpr_comp_cnt;
-        info.props.dx10_clamp = program.settings.dx10_clamp;
+        info.num_user_data = program.settings.num_user_regs;
+        info.num_input_vgprs = program.settings.vgpr_comp_cnt;
+        info.num_allocated_vgprs = program.NumVgprs();
+        info.fp_denorm_mode32 = program.settings.fp_denorm_mode32;
+        info.fp_denorm_mode16_64 = program.settings.fp_denorm_mode64;
+        info.fp_round_mode32 = program.settings.fp_round_mode32;
+        info.fp_round_mode16_64 = program.settings.fp_round_mode64;
     };
-    info.Initialize(stage, l_stage);
+    info.Initialize(stage);
     switch (stage) {
-    case HwStage::Local: {
+    case Stage::Local: {
         BuildCommon(regs.ls_program);
         Shader::TessellationDataConstantBuffer tess_constants{};
-        const auto* hull_info = infos[u32(SwStage::TessellationControl)];
+        const auto* hull_info = infos[u32(Shader::LogicalStage::TessellationControl)];
         hull_info->ReadTessConstantBuffer(tess_constants);
-        info.hw.ls.ls_stride = tess_constants.ls_stride;
+        info.ls_info.ls_stride = tess_constants.ls_stride;
         break;
     }
-    case HwStage::Hull:
+    case Stage::Hull: {
         BuildCommon(regs.hs_program);
+        info.hs_info.num_input_control_points = regs.ls_hs_config.hs_input_control_points;
+        info.hs_info.num_threads = regs.ls_hs_config.hs_output_control_points;
+        info.hs_info.tess_type = regs.tess_config.type;
+        info.hs_info.offchip_lds_enable = regs.hs_program.settings.oc_lds_en;
+
+        // We need to initialize most hs_info fields after finding the V# with tess constants
         break;
-    case HwStage::Export:
+    }
+    case Stage::Export: {
         BuildCommon(regs.es_program);
-        info.hw.es.vertex_data_size = regs.vgt_esgs_ring_itemsize;
+        info.es_info.vertex_data_size = regs.vgt_esgs_ring_itemsize;
+        if (l_stage == LogicalStage::TessellationEval) {
+            info.es_vs_info.tess_type = regs.tess_config.type;
+            info.es_vs_info.tess_topology = regs.tess_config.topology;
+            info.es_vs_info.tess_partitioning = regs.tess_config.partitioning;
+        }
         break;
-    case HwStage::Geometry: {
+    }
+    case Stage::Vertex: {
+        BuildCommon(regs.vs_program);
+        info.vs_info.step_rate_0 = regs.vgt_instance_step_rate_0;
+        info.vs_info.step_rate_1 = regs.vgt_instance_step_rate_1;
+        info.vs_info.num_outputs = MapOutputs(info.vs_info.outputs, regs.vs_output_control);
+        info.vs_info.emulate_depth_negative_one_to_one =
+            !instance.IsDepthClipControlSupported() &&
+            regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
+        info.vs_info.tess_emulated_primitive =
+            regs.primitive_type == AmdGpu::PrimitiveType::RectList ||
+            regs.primitive_type == AmdGpu::PrimitiveType::QuadList;
+        info.vs_info.clip_disable = regs.IsClipDisabled();
+        if (l_stage == LogicalStage::TessellationEval) {
+            info.es_vs_info.tess_type = regs.tess_config.type;
+            info.es_vs_info.tess_topology = regs.tess_config.topology;
+            info.es_vs_info.tess_partitioning = regs.tess_config.partitioning;
+        }
+        break;
+    }
+    case Stage::Geometry: {
         BuildCommon(regs.gs_program);
-        info.hw.gs.num_outputs = MapOutputs(info.hw.gs.outputs, regs.vs_output_control);
-        info.hw.gs.output_vertices = regs.vgt_gs_max_vert_out;
-        info.hw.gs.num_invocations =
+        auto& gs_info = info.gs_info;
+        gs_info.num_outputs = MapOutputs(gs_info.outputs, regs.vs_output_control);
+        gs_info.output_vertices = regs.vgt_gs_max_vert_out;
+        gs_info.num_invocations =
             regs.vgt_gs_instance_cnt.IsEnabled() ? regs.vgt_gs_instance_cnt.count : 1;
         if (regs.stage_enable.raw == AmdGpu::ShaderStageEnable::LsHsEsGs) {
-            info.hw.gs.in_primitive = [&]() {
+            gs_info.in_primitive = [&]() {
                 switch (regs.tess_config.topology) {
                 case AmdGpu::TessellationTopology::Point:
                     return AmdGpu::PrimitiveType::PointList;
@@ -138,129 +171,76 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
                 }
             }();
         } else {
-            info.hw.gs.in_primitive = regs.primitive_type;
+            gs_info.in_primitive = regs.primitive_type;
         }
         for (u32 stream_id = 0; stream_id < Shader::GsMaxOutputStreams; ++stream_id) {
-            info.hw.gs.out_primitive[stream_id] =
+            gs_info.out_primitive[stream_id] =
                 regs.vgt_gs_out_prim_type.GetPrimitiveType(stream_id);
         }
-        info.hw.gs.in_vertex_data_size = regs.vgt_esgs_ring_itemsize;
-        info.hw.gs.out_vertex_data_size = regs.vgt_gs_vert_itemsize[0];
-        info.hw.gs.mode = regs.vgt_gs_mode.mode;
+        gs_info.in_vertex_data_size = regs.vgt_esgs_ring_itemsize;
+        gs_info.out_vertex_data_size = regs.vgt_gs_vert_itemsize[0];
+        gs_info.mode = regs.vgt_gs_mode.mode;
         const auto params_vc = AmdGpu::GetParams(regs.vs_program);
-        info.hw.gs.vs_copy = params_vc.code;
-        info.hw.gs.vs_copy_hash = params_vc.hash;
-        DumpShader(info.hw.gs.vs_copy, info.hw.gs.vs_copy_hash, Shader::HwStage::Vertex, 0,
-                   "copy.bin");
+        gs_info.vs_copy = params_vc.code;
+        gs_info.vs_copy_hash = params_vc.hash;
+        DumpShader(gs_info.vs_copy, gs_info.vs_copy_hash, Shader::Stage::Vertex, 0, "copy.bin");
         break;
     }
-    case HwStage::Vertex: {
-        BuildCommon(regs.vs_program);
-        info.hw.vs.user_clip_plane_mask = regs.clipper_control.user_clip_plane_enable;
-        info.hw.vs.num_outputs = MapOutputs(info.hw.vs.outputs, regs.vs_output_control);
-        info.hw.vs.emulate_depth_negative_one_to_one =
-            !instance.IsDepthClipControlSupported() &&
-            regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
-        info.hw.vs.clip_disable = regs.IsClipDisabled();
-        break;
-    }
-    case HwStage::Fragment: {
+    case Stage::Fragment: {
         BuildCommon(regs.ps_program);
-        info.hw.fs.en_flags = regs.ps_input_ena;
-        info.hw.fs.addr_flags = regs.ps_input_addr;
-        info.hw.fs.num_inputs = regs.num_interp;
-        info.hw.fs.front_face_all_bits = regs.barycentric_control.front_face_all_bits;
-        info.hw.fs.depth_before_shader = regs.depth_shader_control.depth_before_shader;
-        info.hw.fs.num_samples =
-            regs.ps_input_addr.sample_coverage_ena && regs.ps_input_ena.sample_coverage_ena
-                ? regs.aa_config.NumSamples()
-                : 1;
-        info.hw.fs.z_export_format = regs.z_export_format;
+        info.fs_info.en_flags = regs.ps_input_ena;
+        info.fs_info.addr_flags = regs.ps_input_addr;
+        info.fs_info.num_inputs = regs.num_interp;
+        info.fs_info.is_vs_direct =
+            regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::Vs;
+        info.fs_info.prim_type = graphics_key.prim_type;
+        info.fs_info.z_export_format = regs.z_export_format;
         u8 stencil_ref_export_enable = regs.depth_shader_control.stencil_op_val_export_enable |
                                        regs.depth_shader_control.stencil_test_val_export_enable;
-        info.hw.fs.mrtz_mask = regs.depth_shader_control.z_export_enable |
-                               (stencil_ref_export_enable << 1) |
-                               (regs.depth_shader_control.mask_export_enable << 2) |
-                               (regs.depth_shader_control.coverage_to_mask_enable << 3);
+        info.fs_info.mrtz_mask = regs.depth_shader_control.z_export_enable |
+                                 (stencil_ref_export_enable << 1) |
+                                 (regs.depth_shader_control.mask_export_enable << 2) |
+                                 (regs.depth_shader_control.coverage_to_mask_enable << 3);
         const auto& cb0_blend = regs.blend_control[0];
         if (cb0_blend.enable) {
-            info.hw.fs.dual_source_blending =
+            info.fs_info.dual_source_blending =
                 LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.color_dst_factor) ||
                 LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.color_src_factor);
             if (cb0_blend.separate_alpha_blend) {
-                info.hw.fs.dual_source_blending |=
+                info.fs_info.dual_source_blending |=
                     LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.alpha_dst_factor) ||
                     LiverpoolToVK::IsDualSourceBlendFactor(cb0_blend.alpha_src_factor);
             }
         } else {
-            info.hw.fs.dual_source_blending = false;
+            info.fs_info.dual_source_blending = false;
         }
         const auto& ps_inputs = regs.ps_inputs;
         for (u32 i = 0; i < regs.num_interp; i++) {
-            info.hw.fs.inputs[i] = {
-                .param_index = u16(ps_inputs[i].input_offset),
-                .is_default = u16(ps_inputs[i].use_default),
-                .is_flat = u16(ps_inputs[i].flat_shade),
-                .default_value = u16(ps_inputs[i].default_value),
+            info.fs_info.inputs[i] = {
+                .param_index = u8(ps_inputs[i].input_offset),
+                .is_default = bool(ps_inputs[i].use_default),
+                .is_flat = bool(ps_inputs[i].flat_shade),
+                .default_value = u8(ps_inputs[i].default_value),
             };
         }
         for (u32 i = 0; i < Shader::MaxColorBuffers; i++) {
-            info.hw.fs.color_buffers[i] = graphics_key.color_buffers[i];
+            info.fs_info.color_buffers[i] = graphics_key.color_buffers[i];
         }
-        // Lowered user clip planes ride the same emulation path as guest-exported distances, so
-        // the fragment side arms whenever the hardware vertex stage lowers them, keeping its input
-        // locations in sync with the shifted vertex outputs.
-        const bool lowers_user_clip_planes =
-            regs.clipper_control.user_clip_plane_enable &&
-            !regs.stage_enable.IsStageEnabled(static_cast<u32>(HwStage::Geometry));
-        info.hw.fs.clip_distance_emulation =
-            ((regs.vs_output_control.clip_distance_enable &&
-              !regs.stage_enable.IsStageEnabled(static_cast<u32>(HwStage::Local))) ||
-             lowers_user_clip_planes) &&
+        info.fs_info.clip_distance_emulation =
+            regs.vs_output_control.clip_distance_enable &&
+            !regs.stage_enable.IsStageEnabled(static_cast<u32>(Stage::Local)) &&
             profile.needs_clip_distance_emulation;
         break;
     }
-    case HwStage::Compute: {
+    case Stage::Compute: {
         const auto& cs_pgm = liverpool->GetCsRegs();
-        info.props.num_user_data = cs_pgm.settings.num_user_regs;
-        info.props.num_allocated_vgprs = cs_pgm.settings.num_vgprs * 4;
-        info.props.fp_denorm_mode32 = cs_pgm.settings.fp_denorm_mode32;
-        info.props.fp_denorm_mode16_64 = cs_pgm.settings.fp_denorm_mode64;
-        info.props.fp_round_mode32 = cs_pgm.settings.fp_round_mode32;
-        info.props.fp_round_mode16_64 = cs_pgm.settings.fp_round_mode64;
-        info.props.dx10_clamp = cs_pgm.settings.dx10_clamp;
-        info.hw.cs.workgroup_size = {cs_pgm.num_thread_x.full, cs_pgm.num_thread_y.full,
-                                     cs_pgm.num_thread_z.full};
-        info.hw.cs.tgid_enable = {cs_pgm.IsTgidEnabled(0), cs_pgm.IsTgidEnabled(1),
-                                  cs_pgm.IsTgidEnabled(2)};
-        info.hw.cs.shared_memory_size = cs_pgm.SharedMemSize();
-        break;
-    }
-    default:
-        break;
-    }
-    switch (l_stage) {
-    case SwStage::Vertex:
-        info.sw.vs.step_rate_0 = regs.vgt_instance_step_rate_0;
-        info.sw.vs.step_rate_1 = regs.vgt_instance_step_rate_1;
-        info.sw.vs.vertex_sgpr_offset = draw_indirect_params.vertex_sgpr_offset;
-        info.sw.vs.instance_sgpr_offset = draw_indirect_params.instance_sgpr_offset;
-        info.sw.vs.is_indirect = draw_indirect_params.is_indirect;
-        info.sw.vs.tess_emulated_primitive =
-            regs.primitive_type == AmdGpu::PrimitiveType::RectList ||
-            regs.primitive_type == AmdGpu::PrimitiveType::QuadList;
-        break;
-    case SwStage::TessellationControl: {
-        info.sw.tcs.num_input_control_points = regs.ls_hs_config.hs_input_control_points;
-        info.sw.tcs.num_threads = regs.ls_hs_config.hs_output_control_points;
-        info.sw.tcs.tess_type = regs.tess_config.type;
-        info.sw.tcs.offchip_lds_enable = regs.hs_program.settings.oc_lds_en;
-        break;
-    }
-    case SwStage::TessellationEval: {
-        info.sw.tes.tess_type = regs.tess_config.type;
-        info.sw.tes.tess_topology = regs.tess_config.topology;
-        info.sw.tes.tess_partitioning = regs.tess_config.partitioning;
+        info.num_user_data = cs_pgm.settings.num_user_regs;
+        info.num_allocated_vgprs = cs_pgm.settings.num_vgprs * 4;
+        info.cs_info.workgroup_size = {cs_pgm.num_thread_x.full, cs_pgm.num_thread_y.full,
+                                       cs_pgm.num_thread_z.full};
+        info.cs_info.tgid_enable = {cs_pgm.IsTgidEnabled(0), cs_pgm.IsTgidEnabled(1),
+                                    cs_pgm.IsTgidEnabled(2)};
+        info.cs_info.shared_memory_size = cs_pgm.SharedMemSize();
         break;
     }
     default:
@@ -270,17 +250,20 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStag
 }
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
-                             AmdGpu::Liverpool* liverpool_, u32 sparse_page_shift)
+                             AmdGpu::Liverpool* liverpool_)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
-      desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
+      desc_heap{instance, scheduler.GetMasterSemaphore(), DescriptorHeapSizes} {
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
+        // When binding a UBO, we calculate its size considering the offset in the larger buffer
+        // cache underlying resource. In some cases, it may produce sizes exceeding the system
+        // maximum allowed UBO range, so we need to reduce the threshold to prevent issues.
+        .max_ubo_size = instance.UniformMaxSize() - instance.UniformMinAlignment(),
         .max_viewport_width = instance.GetMaxViewportWidth(),
         .max_viewport_height = instance.GetMaxViewportHeight(),
         .max_shared_memory_size = instance.MaxComputeSharedMemorySize(),
         .supported_spirv = SpirvVersion1_6,
         .subgroup_size = instance.SubgroupSize(),
-        .sparse_page_shift = sparse_page_shift,
         .support_int8 = instance.IsShaderInt8Supported(),
         .support_int16 = instance.IsShaderInt16Supported(),
         .support_int64 = instance.IsShaderInt64Supported(),
@@ -318,7 +301,6 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_amd_shader_explicit_vertex_parameter =
             instance_.IsAmdShaderExplicitVertexParameterSupported(),
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
-        .supports_shader_subgroup_clock = instance_.IsShaderSubgroupClockSupported(),
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
@@ -326,6 +308,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
+        .needs_ssbo_store_load_barrier = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
     WarmUp();
@@ -338,11 +321,35 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
 PipelineCache::~PipelineCache() = default;
 
-const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params) {
-    draw_indirect_params = params;
+void PipelineCache::FillAuxGSModule() {
+    // Fill the Geometry slot with the FS's companion auxiliary GS (per-vertex expansion)
+    // when there is no game geometry shader. The module is compiled once (at FS compile time or
+    // preload) and cached by interface-format signature, so this is just a lookup. A non-zero
+    // signature that misses the cache is a bug — the aux GS is always generated at FS compile time
+    // on the draw path, or loaded at preload (which returns false when the blob is absent) — so
+    // assert rather than silently leaving the FS's per-vertex inputs without a producer.
+    if (infos[u32(Shader::LogicalStage::Geometry)]) {
+        return;
+    }
+    if (graphics_key.aux_gs_signature == 0) {
+        return;
+    }
+    // The signature excludes prim_type; assert the pipeline carrying a non-zero signature is always
+    // TriangleList, guarding the "uniform prim_type" assumption behind the shared key.
+    ASSERT_MSG(graphics_key.prim_type == AmdGpu::PrimitiveType::TriangleList,
+               "Per-vertex aux GS used for non-triangle primitive");
+    const auto gs_it = aux_gs_cache.find(graphics_key.aux_gs_signature);
+    ASSERT_MSG(gs_it != aux_gs_cache.end(),
+               "Per-vertex aux GS (signature {:#x}) missing from cache",
+               graphics_key.aux_gs_signature);
+    modules[u32(Shader::LogicalStage::Geometry)] = gs_it->second;
+}
+
+const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     if (!RefreshGraphicsKey()) {
         return nullptr;
     }
+    FillAuxGSModule();
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
@@ -364,6 +371,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 }
             }
         }
+        fetch_shader.reset();
     }
     return it->second.get();
 }
@@ -435,14 +443,6 @@ bool PipelineCache::RefreshGraphicsKey() {
         color_buffer.num_conversion = col_buf.GetNumberConversion();
         color_buffer.export_format = regs.color_export_format.GetFormat(cb);
         color_buffer.swizzle = col_buf.Swizzle();
-
-        const auto& bc = regs.blend_control[cb];
-        color_buffer.blend_self_scale =
-            bc.enable && !col_buf.info.blend_bypass &&
-            (bc.color_func == AmdGpu::BlendControl::BlendFunc::Min ||
-             bc.color_func == AmdGpu::BlendControl::BlendFunc::Max) &&
-            bc.color_src_factor == AmdGpu::BlendControl::BlendFactor::SrcColor &&
-            bc.color_dst_factor == AmdGpu::BlendControl::BlendFactor::DstColor;
     }
 
     // Compile and bind shader stages
@@ -496,10 +496,10 @@ bool PipelineCache::RefreshGraphicsKey() {
 bool PipelineCache::RefreshGraphicsStages() {
     const auto& regs = liverpool->regs;
     auto& key = graphics_key;
-    fetch_shader = nullptr;
+    fetch_shader = std::nullopt;
 
     Shader::Backend::Bindings binding{};
-    const auto bind_stage = [&](HwStage stage_in, SwStage stage_out) -> bool {
+    const auto bind_stage = [&](Shader::Stage stage_in, Shader::LogicalStage stage_out) -> bool {
         const auto stage_in_idx = static_cast<u32>(stage_in);
         const auto stage_out_idx = static_cast<u32>(stage_out);
         if (!regs.stage_enable.IsStageEnabled(stage_in_idx)) {
@@ -516,17 +516,32 @@ bool PipelineCache::RefreshGraphicsStages() {
         }
 
         const auto params = AmdGpu::GetParams(*pgm);
-        std::tie(infos[stage_out_idx], modules[stage_out_idx], key.stage_hashes[stage_out_idx]) =
+        std::optional<Shader::Gcn::FetchShaderData> fetch_shader_;
+        u64 stage_aux_gs_signature{};
+        std::tie(infos[stage_out_idx], modules[stage_out_idx], fetch_shader_,
+                 key.stage_hashes[stage_out_idx], stage_aux_gs_signature) =
             GetProgram(stage_in, stage_out, params, binding);
+        if (stage_in == Shader::Stage::Fragment) {
+            // The signature excludes prim_type; assert a non-zero signature never belongs to a
+            // non-triangle primitive (CanPerVertexInterp already requires TriangleList at
+            // translation).
+            ASSERT_MSG(stage_aux_gs_signature == 0 ||
+                           regs.primitive_type == AmdGpu::PrimitiveType::TriangleList,
+                       "Per-vertex aux GS for non-triangle primitive");
+            key.aux_gs_signature = stage_aux_gs_signature;
+        }
+        if (fetch_shader_) {
+            fetch_shader = fetch_shader_;
+        }
         return true;
     };
 
     infos.fill(nullptr);
     modules.fill(nullptr);
 
-    bind_stage(HwStage::Fragment, SwStage::Fragment);
+    bind_stage(Stage::Fragment, LogicalStage::Fragment);
 
-    const auto* fs_info = infos[static_cast<u32>(SwStage::Fragment)];
+    const auto* fs_info = infos[static_cast<u32>(LogicalStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
     key.num_color_attachments = std::bit_width(key.mrt_mask);
 
@@ -540,10 +555,10 @@ bool PipelineCache::RefreshGraphicsStages() {
             LOG_WARNING(Render_Vulkan, "Geometry shader features unsupported, skipping");
             return false;
         }
-        if (!bind_stage(HwStage::Export, SwStage::Vertex)) {
+        if (!bind_stage(Stage::Export, LogicalStage::Vertex)) {
             return false;
         }
-        if (!bind_stage(HwStage::Geometry, SwStage::Geometry)) {
+        if (!bind_stage(Stage::Geometry, LogicalStage::Geometry)) {
             return false;
         }
         break;
@@ -551,13 +566,13 @@ bool PipelineCache::RefreshGraphicsStages() {
         if (!instance.IsTessellationSupported()) {
             return false;
         }
-        if (!bind_stage(HwStage::Hull, SwStage::TessellationControl)) {
+        if (!bind_stage(Stage::Hull, LogicalStage::TessellationControl)) {
             return false;
         }
-        if (!bind_stage(HwStage::Vertex, SwStage::TessellationEval)) {
+        if (!bind_stage(Stage::Vertex, LogicalStage::TessellationEval)) {
             return false;
         }
-        if (!bind_stage(HwStage::Local, SwStage::Vertex)) {
+        if (!bind_stage(Stage::Local, LogicalStage::Vertex)) {
             return false;
         }
         break;
@@ -573,28 +588,27 @@ bool PipelineCache::RefreshGraphicsStages() {
             LOG_WARNING(Render_Vulkan, "Geometry shader features unsupported, skipping");
             return false;
         }
-        if (!bind_stage(HwStage::Hull, SwStage::TessellationControl)) {
+        if (!bind_stage(Stage::Hull, LogicalStage::TessellationControl)) {
             return false;
         }
-        if (!bind_stage(HwStage::Export, SwStage::TessellationEval)) {
+        if (!bind_stage(Stage::Export, LogicalStage::TessellationEval)) {
             return false;
         }
-        if (!bind_stage(HwStage::Local, SwStage::Vertex)) {
+        if (!bind_stage(Stage::Local, LogicalStage::Vertex)) {
             return false;
         }
-        if (!bind_stage(HwStage::Geometry, SwStage::Geometry)) {
+        if (!bind_stage(Stage::Geometry, LogicalStage::Geometry)) {
             return false;
         }
         break;
     case AmdGpu::ShaderStageEnable::VgtStages::Vs:
-        bind_stage(HwStage::Vertex, SwStage::Vertex);
+        bind_stage(Stage::Vertex, LogicalStage::Vertex);
         break;
     default:
-        LOG_WARNING(Render_Vulkan, "unimplemented shader stage {}", (u32)regs.stage_enable.raw);
-        return false;
+        UNREACHABLE_MSG("unhandled stage_en: {}", (u32)regs.stage_enable.raw);
     }
 
-    const auto* vs_info = infos[static_cast<u32>(SwStage::Vertex)];
+    const auto* vs_info = infos[static_cast<u32>(Shader::LogicalStage::Vertex)];
     if (vs_info && fetch_shader && !instance.IsVertexInputDynamicState()) {
         // Without vertex input dynamic state, the pipeline needs to specialize on format.
         // Stride will still be handled outside the pipeline using dynamic state.
@@ -616,28 +630,57 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
-    std::tie(infos[0], modules[0], compute_key.value) =
-        GetProgram(HwStage::Compute, SwStage::Compute, cs_params, binding);
+    std::tie(infos[0], modules[0], fetch_shader, compute_key.value, std::ignore) =
+        GetProgram(Shader::Stage::Compute, LogicalStage::Compute, cs_params, binding);
     return true;
 }
 
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
-                                              Shader::Backend::Bindings& binding) {
-    LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.hw_stage, info.pgm_hash,
+                                              Shader::Backend::Bindings& binding,
+                                              u64& aux_gs_signature) {
+    aux_gs_signature = 0;
+    LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
-    DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
+    DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
-    DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
+    DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
+
+    // Generate and compile the auxiliary geometry shader for the per-vertex interpolation
+    // fallback. Done at FS compile time where fs_interpolation is still fresh. The compiled module
+    // and its SPIR-V are cached by interface-format signature so fragment shaders sharing the same
+    // input interface reuse one aux GS; the SPIR-V is saved to disk for the next preload.
+    if (info.stage == Stage::Fragment &&
+        Shader::Backend::SPIRV::NeedsPerVertexAuxGS(profile, info, runtime_info)) {
+        aux_gs_signature =
+            Shader::Backend::SPIRV::ComputePerVertexAuxGSSignature(info, runtime_info);
+        // The signature deliberately excludes prim_type (aux GS is only generated for TriangleList
+        // today). Assert the invariant that aux GS generation implies TriangleList, so a
+        // non-triangle primitive can never silently reuse a TriangleList-only aux GS.
+        ASSERT_MSG(runtime_info.fs_info.prim_type == AmdGpu::PrimitiveType::TriangleList,
+                   "Per-vertex aux GS generated for non-triangle primitive");
+        if (!aux_gs_cache.contains(aux_gs_signature)) {
+            auto aux_gs_spv =
+                Shader::Backend::SPIRV::EmitPerVertexAuxGS(profile, info, runtime_info);
+            DumpShader(aux_gs_spv, info.pgm_hash, Stage::Geometry, perm_idx, "spv");
+            aux_gs_cache[aux_gs_signature] = CompileSPV(aux_gs_spv, instance.GetDevice());
+            if (Storage::DataBase::Instance().IsOpened()) {
+                Storage::DataBase::Instance().Save(Storage::BlobType::AuxiliaryShader,
+                                                   fmt::format("{:#018x}_ag", aux_gs_signature),
+                                                   std::move(aux_gs_spv));
+            }
+            LOG_INFO(Render_Vulkan, "Generated per-vertex aux GS for FS {:#x}", info.pgm_hash);
+        }
+    }
 
     vk::ShaderModule module;
 
-    auto patch = GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv");
+    auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
     if (is_patched) {
-        LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
+        LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());
     } else {
         module = CompileSPV(spv, instance.GetDevice());
@@ -645,34 +688,35 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 
     RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
-    const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
+    const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (EmulatorSettings.IsShaderCollect()) {
-        DebugState.CollectShader(name, info.sw_stage, module, spv, code,
+        DebugState.CollectShader(name, info.l_stage, module, spv, code,
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
     return module;
 }
 
-PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
+PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
-    auto runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
+    auto runtime_info = BuildRuntimeInfo(stage, l_stage);
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
-        it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
+        it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
         auto& program = it_pgm.value();
         auto start = binding;
-        const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
+        u64 aux_gs_signature{};
+        const auto module =
+            CompileModule(program->info, runtime_info, params.code, 0, binding, aux_gs_signature);
         auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+        spec.aux_gs_signature = aux_gs_signature;
         const auto perm_hash = HashCombine(params.hash, 0);
 
         RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
         program->AddPermut(module, std::move(spec));
-        if (auto& fetch = program->modules[0].spec.fetch_shader_data; !fetch.Empty()) {
-            fetch_shader = &fetch;
-        }
-        return std::make_tuple(&program->info, module, perm_hash);
+        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
+                               perm_hash, aux_gs_signature);
     }
 
     auto& program = it_pgm.value();
@@ -689,21 +733,25 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
-        auto new_info = Shader::Info(hw_stage, sw_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
+        auto new_info = Shader::Info(stage, l_stage, params);
+        u64 aux_gs_signature{};
+        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding,
+                               aux_gs_signature);
+        spec.aux_gs_signature = aux_gs_signature;
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         program->AddPermut(module, std::move(spec));
-    } else {
-        info.AddBindings(binding);
-        module = it->module;
-        perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
+        return std::make_tuple(&program->info, module,
+                               program->modules[perm_idx].spec.fetch_shader_data, perm_hash,
+                               aux_gs_signature);
     }
-    if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
-        fetch_shader = &fetch;
-    }
-    return std::make_tuple(&program->info, module, perm_hash);
+    info.AddBindings(binding);
+    module = it->module;
+    perm_idx = std::distance(program->modules.begin(), it);
+    perm_hash = HashCombine(params.hash, perm_idx);
+    return std::make_tuple(&program->info, module,
+                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash,
+                           program->modules[perm_idx].spec.aux_gs_signature);
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
@@ -734,7 +782,7 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
     return new_module;
 }
 
-std::string PipelineCache::GetShaderName(Shader::HwStage stage, u64 hash,
+std::string PipelineCache::GetShaderName(Shader::Stage stage, u64 hash,
                                          std::optional<size_t> perm) {
     if (perm) {
         return fmt::format("{}_{:#018x}_{}", stage, hash, *perm);
@@ -742,7 +790,7 @@ std::string PipelineCache::GetShaderName(Shader::HwStage stage, u64 hash,
     return fmt::format("{}_{:#018x}", stage, hash);
 }
 
-void PipelineCache::DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage,
+void PipelineCache::DumpShader(std::span<const u32> code, u64 hash, Shader::Stage stage,
                                size_t perm_idx, std::string_view ext) {
     if (!EmulatorSettings.IsDumpShaders()) {
         return;
@@ -758,7 +806,7 @@ void PipelineCache::DumpShader(std::span<const u32> code, u64 hash, Shader::HwSt
     file.WriteSpan(code);
 }
 
-std::optional<std::vector<u32>> PipelineCache::GetShaderPatch(u64 hash, Shader::HwStage stage,
+std::optional<std::vector<u32>> PipelineCache::GetShaderPatch(u64 hash, Shader::Stage stage,
                                                               size_t perm_idx,
                                                               std::string_view ext) {
 

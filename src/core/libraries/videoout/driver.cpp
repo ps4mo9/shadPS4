@@ -278,8 +278,8 @@ void VideoOutDriver::Flip(const Request& req) {
 }
 
 void VideoOutDriver::DrawBlankFrame() {
-    const auto empty_frame = presenter->PrepareBlankFrame(true);
-    presenter->Present(empty_frame, false, false);
+    const auto empty_frame = presenter->PrepareBlankFrame(false);
+    presenter->Present(empty_frame);
 }
 
 void VideoOutDriver::DrawLastFrame() {

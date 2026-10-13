@@ -35,9 +35,6 @@ bool IsDualSourceBlendFactor(AmdGpu::BlendControl::BlendFactor factor);
 
 vk::BlendOp BlendOp(AmdGpu::BlendControl::BlendFunc func);
 
-void NormalizeMinMaxBlend(vk::BlendOp& op, vk::BlendFactor& src, vk::BlendFactor& dst,
-                          AmdGpu::NumberFormat format);
-
 vk::LogicOp LogicOp(AmdGpu::ColorControl::LogicOp logic_op);
 
 vk::SamplerAddressMode ClampMode(AmdGpu::ClampMode mode);
@@ -64,6 +61,8 @@ struct SurfaceFormatInfo {
 };
 std::span<const SurfaceFormatInfo> SurfaceFormats();
 
+vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
+
 struct DepthFormatInfo {
     AmdGpu::DepthBuffer::ZFormat z_format;
     AmdGpu::DepthBuffer::StencilFormat stencil_format;
@@ -78,44 +77,6 @@ vk::Format DepthFormat(AmdGpu::DepthBuffer::ZFormat z_format,
 vk::ClearValue ColorBufferClearValue(const AmdGpu::ColorBuffer& color_buffer);
 
 vk::SampleCountFlagBits NumSamples(u32 num_samples, vk::SampleCountFlags supported_flags);
-
-// Table 8.13 Data and Image Formats [Sea Islands Series Instruction Set Architecture]
-constexpr size_t amd_gpu_data_format_bit_size = 6;   // All values are under 64
-constexpr size_t amd_gpu_number_format_bit_size = 4; // All values are under 16
-constexpr size_t surface_format_table_size =
-    (1u << amd_gpu_data_format_bit_size) * (1u << amd_gpu_number_format_bit_size);
-
-extern const std::array<vk::Format, surface_format_table_size> surface_format_table;
-
-constexpr size_t GetSurfaceFormatTableIndex(AmdGpu::DataFormat data_format,
-                                            AmdGpu::NumberFormat num_format) {
-    DEBUG_ASSERT(u32(data_format) < 1 << amd_gpu_data_format_bit_size);
-    DEBUG_ASSERT(u32(num_format) < 1 << amd_gpu_number_format_bit_size);
-    size_t result = static_cast<size_t>(num_format) |
-                    (static_cast<size_t>(data_format) << amd_gpu_number_format_bit_size);
-    return result;
-}
-
-inline vk::Format SurfaceFormat(AmdGpu::DataFormat data_format,
-                                AmdGpu::NumberFormat num_format) noexcept {
-    const u32 data_fmt = static_cast<u32>(data_format);
-    const u32 num_fmt = static_cast<u32>(num_format);
-    if (data_fmt >= (1u << amd_gpu_data_format_bit_size) ||
-        num_fmt >= (1u << amd_gpu_number_format_bit_size)) {
-        LOG_ERROR(Render_Vulkan, "Invalid surface format {}/{} used, falling back", data_fmt,
-                  num_fmt);
-        return vk::Format::eR8G8B8A8Unorm;
-    }
-    vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
-    if (result == vk::Format::eUndefined && data_format != AmdGpu::DataFormat::FormatInvalid) {
-        // Some titles hand over descriptors with formats the table does not cover. Log it and
-        // keep going with a safe format instead of aborting the emulator.
-        LOG_ERROR(Render_Vulkan, "Unknown data_format={} and num_format={}, falling back",
-                  data_fmt, num_fmt);
-        return vk::Format::eR8G8B8A8Unorm;
-    }
-    return result;
-}
 
 static inline bool IsFormatDepthCompatible(vk::Format fmt) {
     switch (fmt) {

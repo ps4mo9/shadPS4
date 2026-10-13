@@ -19,7 +19,7 @@ class TextureCache;
 
 namespace Vulkan {
 
-static constexpr u32 MaxShaderStages = static_cast<u32>(Shader::SwStage::NumLogicalStages);
+static constexpr u32 MaxShaderStages = static_cast<u32>(Shader::LogicalStage::NumLogicalStages);
 static constexpr u32 MaxVertexBufferCount = 32;
 
 class Instance;
@@ -55,6 +55,11 @@ struct GraphicsPipelineKey {
         AmdGpu::ProvokingVtxLast provoking_vtx_last : 1;
         u32 depth_clip_enable : 1;
     };
+    // Interface-format signature of the fragment shader's companion auxiliary geometry shader
+    // (per-vertex interpolation fallback). 0 means no aux GS; otherwise this pipeline inserts an
+    // aux GS looked up by this signature. Kept as a dedicated field (not overloaded onto
+    // stage_hashes[Geometry]) so that slot stays pure game-GS semantics.
+    size_t aux_gs_signature{};
 
     GraphicsPipelineKey() {
         std::memset(this, 0, sizeof(*this));
@@ -88,12 +93,12 @@ public:
                      vk::PipelineCache pipeline_cache,
                      std::span<const Shader::Info*, MaxShaderStages> stages,
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
-                     const Shader::Gcn::FetchShaderData* fetch_shader,
+                     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
                      bool preloading);
     ~GraphicsPipeline();
 
-    const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
+    const std::optional<const Shader::Gcn::FetchShaderData>& GetFetchShader() const noexcept {
         return fetch_shader;
     }
 
@@ -113,7 +118,7 @@ private:
 
 private:
     GraphicsPipelineKey key;
-    Shader::Gcn::FetchShaderData fetch_shader{};
+    std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
 };
 
 struct ClipDistanceShaderKey {

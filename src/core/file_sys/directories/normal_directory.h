@@ -1,10 +1,9 @@
-// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include <memory>
-#include <string>
 #include <string_view>
 #include <vector>
 #include "common/types.h"
@@ -34,7 +33,7 @@ private:
     };
 #pragma pack(pop)
 
-    std::string guest_directory{};
+    std::string_view guest_directory{};
     s64 previous_file_offset = -1;
 
     void RebuildDirents(void);

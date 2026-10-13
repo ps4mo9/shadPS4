@@ -4,7 +4,6 @@
 #pragma once
 
 #include "shader_recompiler/ir/basic_block.h"
-#include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
 
 namespace Shader {
@@ -14,24 +13,16 @@ void InjectClipDistanceAttributes(IR::Program& program, RuntimeInfo& runtime_inf
 
 namespace Shader::Optimization {
 
-void SsaRewritePass(IR::Program& program);
-void SsaRepairPass(IR::Program& program);
-void PhiSimplificationPass(IR::Program& program);
-void InverseBallotEliminationPass(IR::Program& program);
-void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
-                           const Profile& profile);
-void LowerHardwareIntrinsics(IR::Program& program);
-void LowerPhisToRegsPass(IR::Program& program);
+void SsaRewritePass(IR::BlockList& program);
+void IdentityRemovalPass(IR::BlockList& program);
 void DeadCodeEliminationPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
 void FlattenExtendedUserdataPass(IR::Program& program);
 void ReadLaneEliminationPass(IR::Program& program);
-ResourceDiscoveryList ResourceDiscoverPass(IR::Program& program, const Profile& profile);
-void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& sharp_usages,
-                          const Profile& profile);
+void ResourceTrackingPass(IR::Program& program, const Profile& profile);
+void InsertSsbsoStoreLoadBarrier(IR::Program& program, const Profile& profile);
 void CollectShaderInfoPass(IR::Program& program, const Profile& profile);
 void LowerBufferFormatToRaw(IR::Program& program);
-void LowerUserClipPlanes(IR::Program& program, const RuntimeInfo& runtime_info);
 void LowerFp64ToFp32(IR::Program& program);
 void RingAccessElimination(const IR::Program& program, const RuntimeInfo& runtime_info);
 void TessellationPreprocess(IR::Program& program, RuntimeInfo& runtime_info);

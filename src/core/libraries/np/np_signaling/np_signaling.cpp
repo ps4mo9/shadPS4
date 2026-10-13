@@ -2,23 +2,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstring>
-#include <string>
 #include <vector>
-#include <fmt/format.h>
+
 #include "common/logging/log.h"
 #include "common/singleton.h"
 #include "core/libraries/error_codes.h"
-#include "core/libraries/net/net.h"
-#include "core/libraries/net/net_util.h"
+#include "core/libraries/libs.h"
+#include "core/libraries/network/net.h"
+#include "core/libraries/network/net_util.h"
 #include "core/libraries/network/netctl.h"
 #include "core/libraries/np/np_common.h"
-#include "core/libraries/np/np_handler/np_handler.h"
+#include "core/libraries/np/np_handler.h"
 #include "core/libraries/np/np_manager.h"
 #include "core/libraries/np/np_signaling/np_signaling.h"
 #include "core/libraries/np/np_signaling/np_signaling_helpers.h"
 #include "core/libraries/np/np_signaling/np_signaling_state.h"
-#include "core/libraries/np/np_signaling/np_signaling_transport.h"
-#include "core/libraries/np/signaling_handler.h"
+#include "core/libraries/np/np_signaling/np_signaling_stubs.h"
 
 namespace Libraries::Np::NpSignaling {
 
@@ -26,9 +25,10 @@ using Libraries::Net::sceNetNtohs;
 
 s32 PS4_SYSV_ABI sceNpSignalingInitialize(s64 memorySize, s32 threadPriority, s32 cpuAffinityMask,
                                           s64 threadStackSize) {
-    if (NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_ALREADY_INITIALIZED;
     }
+    InitSignalingMutex();
     SignalingMutexGuard lock;
 
     u32 app_type_4 = 0;
@@ -67,49 +67,63 @@ s32 PS4_SYSV_ABI sceNpSignalingInitialize(s64 memorySize, s32 threadPriority, s3
         return check_app_type_rc;
     }
 
-    NpHandler::GetInstance().GetSignalingState().initialized = true;
+    g_initialized = true;
 
     const s32 rc = Helpers::StartMainRuntime(threadPriority, cpuAffinityMask, threadStackSize);
     if (rc < 0) {
-        NpHandler::GetInstance().GetSignalingState().initialized = false;
+        g_initialized = false;
         Helpers::ShutdownSignalingHeap();
         return rc;
     }
 
     const s32 echo_rc = Helpers::StartEchoRuntime(threadPriority, cpuAffinityMask);
     if (echo_rc < 0) {
-        NpHandler::GetInstance().GetSignalingState().initialized = false;
+        g_initialized = false;
         Helpers::ShutdownRuntime();
         Helpers::ShutdownSignalingHeap();
         return echo_rc;
     }
 
+    const s32 callout_rc = NpCommon::sceNpCalloutInitCtx(
+        &g_callout_ctx, "SceNpSignalingCallout", static_cast<u64>(threadStackSize), threadPriority,
+        static_cast<u64>(cpuAffinityMask));
+    if (callout_rc < 0) {
+        g_initialized = false;
+        Helpers::ShutdownRuntime();
+        Helpers::ShutdownSignalingHeap();
+        return callout_rc;
+    }
+    g_callout_ctx_active = true;
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceNpSignalingTerminate() {
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     {
         SignalingMutexGuard lock;
-        NpHandler::GetInstance().GetSignalingState().initialized = false;
+        g_initialized = false;
     }
 
     Helpers::ShutdownRuntime();
 
+    if (g_callout_ctx_active) {
+        NpCommon::sceNpCalloutTermCtx(&g_callout_ctx);
+        g_callout_ctx_active = false;
+    }
+
     Helpers::ShutdownSignalingHeap();
 
-    size_t context_count = 0;
     {
         SignalingMutexGuard lock;
-        auto& state = NpHandler::GetInstance().GetSignalingState();
-        context_count = state.contexts.size();
-        state.ResetSig1Data();
+        g_contexts.clear();
+        g_connections.clear();
+        g_npid_to_conn.clear();
+        g_peer_netinfo_results.clear();
     }
-    for (size_t i = 0; i < context_count; ++i) {
-        SignalingHandler::ReleaseContextRef();
-    }
+
+    DestroySignalingMutex();
 
     LOG_INFO(Lib_NpSignaling, "cleared all state");
     return ORBIS_OK;
@@ -119,7 +133,7 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContext(const void* npId, void* callback, v
                                              OrbisNpSignalingContextId* outContextId) {
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
     }
@@ -133,12 +147,12 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContext(const void* npId, void* callback, v
         return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
     }
 
-    const bool transport_ready = Transport::EnsureTransport();
+    const bool transport_ready = Stubs::EnsureTransport();
 
     s32 ctx_id = 0;
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
 
@@ -147,7 +161,7 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContext(const void* npId, void* callback, v
             return ORBIS_NP_SIGNALING_ERROR_CTXID_NOT_AVAILABLE;
         }
 
-        NpSignalingContext& ctx = NpHandler::GetInstance().GetSignalingState().contexts[ctx_id];
+        NpSignalingContext& ctx = g_contexts[ctx_id];
         ctx.callback = reinterpret_cast<OrbisNpSignalingHandler>(callback);
         ctx.callback_arg = callbackArg;
         ctx.active = true;
@@ -157,7 +171,7 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContext(const void* npId, void* callback, v
         ctx.compiled_sdk_version = CaptureCompiledSdkVersion();
         ctx.activate_budget_us = kActivateBudgetMaxUs;
         ctx.activate_last_update_us = NowUs();
-        ctx.bound_port = Transport::ConfiguredPort();
+        ctx.bound_port = Stubs::ConfiguredPort();
         *outContextId = ctx_id;
 
         LOG_INFO(Lib_NpSignaling, "ctxId={} owner='{}' callback={} arg={} sdk={:#x} p2p_port={}",
@@ -165,7 +179,9 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContext(const void* npId, void* callback, v
                  fmt::ptr(callbackArg), ctx.compiled_sdk_version, ctx.bound_port);
     }
 
-    SignalingHandler::AddContextRef();
+    if (transport_ready) {
+        SendStunPing(ctx_id);
+    }
     return ORBIS_OK;
 }
 
@@ -173,7 +189,7 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContextA(s32 userId, void* callback, void* 
                                               OrbisNpSignalingContextId* outContextId) {
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
     }
@@ -186,21 +202,15 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContextA(s32 userId, void* callback, void* 
     if (npid_rc < 0) {
         return npid_rc;
     }
-    OrbisNpAccountId account_id = 0;
-    const s32 account_rc = NpManager::sceNpGetAccountIdA(userId, &account_id);
-    if (account_rc < 0) {
-        return account_rc;
-    }
-    if (account_id == 0) {
-        return ORBIS_NP_ERROR_USER_NOT_FOUND;
-    }
+    // Account id isn't needed without matchmaking wired up; leave it 0 for now.
+    const OrbisNpAccountId account_id = 0;
 
-    const bool transport_ready = Transport::EnsureTransport();
+    const bool transport_ready = Stubs::EnsureTransport();
 
     s32 ctx_id = 0;
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
 
@@ -209,7 +219,7 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContextA(s32 userId, void* callback, void* 
             return ORBIS_NP_SIGNALING_ERROR_CTXID_NOT_AVAILABLE;
         }
 
-        NpSignalingContext& ctx = NpHandler::GetInstance().GetSignalingState().contexts[ctx_id];
+        NpSignalingContext& ctx = g_contexts[ctx_id];
         ctx.callback = reinterpret_cast<OrbisNpSignalingHandler>(callback);
         ctx.callback_arg = callbackArg;
         ctx.active = true;
@@ -221,14 +231,16 @@ s32 PS4_SYSV_ABI sceNpSignalingCreateContextA(s32 userId, void* callback, void* 
         ctx.compiled_sdk_version = CaptureCompiledSdkVersion();
         ctx.activate_budget_us = kActivateBudgetMaxUs;
         ctx.activate_last_update_us = NowUs();
-        ctx.bound_port = Transport::ConfiguredPort();
+        ctx.bound_port = Stubs::ConfiguredPort();
         *outContextId = ctx_id;
 
         LOG_INFO(Lib_NpSignaling, "ctxId={} userId={} owner='{}' accountId={:#x}", ctx_id, userId,
                  OnlineIdToString(ctx.owner_online_id), account_id);
     }
 
-    SignalingHandler::AddContextRef();
+    if (transport_ready) {
+        SendStunPing(ctx_id);
+    }
     return ORBIS_OK;
 }
 
@@ -236,13 +248,13 @@ s32 PS4_SYSV_ABI sceNpSignalingDeleteContext(OrbisNpSignalingContextId ctxId) {
     std::vector<s32> active_conns;
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
 
         LOG_INFO(Lib_NpSignaling, "ctxId={}", ctxId);
 
-        for (const auto& [cid, ci] : NpHandler::GetInstance().GetSignalingState().connections) {
+        for (const auto& [cid, ci] : g_connections) {
             if (ci.ctx_id == ctxId && ci.status != ORBIS_NP_SIGNALING_CONN_STATUS_INACTIVE) {
                 active_conns.push_back(cid);
             }
@@ -250,105 +262,148 @@ s32 PS4_SYSV_ABI sceNpSignalingDeleteContext(OrbisNpSignalingContextId ctxId) {
     }
 
     for (const s32 cid : active_conns) {
-        SignalingHandler::TerminateSig1(cid);
+        CloseConnectionAndDispatchDead(cid, ORBIS_NP_SIGNALING_ERROR_TERMINATED_BY_PEER);
     }
 
     {
         SignalingMutexGuard lock;
         RemoveContextConnectionsLocked(ctxId);
-        for (auto it = NpHandler::GetInstance().GetSignalingState().peer_netinfo_results.begin();
-             it != NpHandler::GetInstance().GetSignalingState().peer_netinfo_results.end();) {
-            it = (it->second.ctx_id == ctxId)
-                     ? NpHandler::GetInstance().GetSignalingState().peer_netinfo_results.erase(it)
-                     : std::next(it);
+        for (auto it = g_peer_netinfo_results.begin(); it != g_peer_netinfo_results.end();) {
+            it = (it->second.ctx_id == ctxId) ? g_peer_netinfo_results.erase(it) : std::next(it);
         }
-        NpHandler::GetInstance().GetSignalingState().contexts.erase(ctxId);
+        g_contexts.erase(ctxId);
     }
-    SignalingHandler::ReleaseContextRef();
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceNpSignalingActivateConnection(OrbisNpSignalingContextId ctxId,
                                                   const void* peerNpId,
                                                   OrbisNpSignalingConnectionId* outConnId) {
-    const s64 call_time = NowMs();
-    const void* caller = __builtin_return_address(0);
-    const void* frame = __builtin_frame_address(0);
-    LOG_INFO(Lib_NpSignaling, "t={} ctxId={} peerNpId={:p} outConnId={:p}", call_time, ctxId,
-             peerNpId, fmt::ptr(outConnId));
+    LOG_INFO(Lib_NpSignaling, "t={} ctxId={} peerNpId={:p} connId={:p}", NowMs(), ctxId, peerNpId,
+             fmt::ptr(outConnId));
 
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
-            LOG_INFO(Lib_NpSignaling,
-                     "result: t={} ctxId={} peer='<unresolved>' "
-                     "rc={:#x}",
-                     call_time, ctxId, ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED);
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
     }
     if (!peerNpId || !outConnId) {
-        LOG_INFO(Lib_NpSignaling,
-                 "result: t={} ctxId={} peer='<unresolved>' "
-                 "rc={:#x}",
-                 call_time, ctxId, ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT);
         return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
     }
 
     OrbisNpId peer_npid{};
     OrbisNpOnlineId peer_online_id{};
-    const s32 normalize_rc = NormalizeNpId(peerNpId, &peer_npid, &peer_online_id);
-    if (normalize_rc != ORBIS_OK) {
-        Helpers::LogInvalidActivationContext(call_time, peerNpId, outConnId, caller, frame);
-        LOG_INFO(Lib_NpSignaling,
-                 "result: t={} ctxId={} peer='<invalid>' "
-                 "rc={:#x}",
-                 call_time, ctxId, normalize_rc);
-        return normalize_rc;
+    if (NormalizeNpId(peerNpId, &peer_npid, &peer_online_id) != ORBIS_OK) {
+        return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+    }
+    const std::string peer_online_id_str = OnlineIdToString(peer_online_id);
+
+    s32 cid = 0;
+    bool reused_established = false;
+    bool queue_activation = false;
+    bool start_handshake = true;
+    {
+        SignalingMutexGuard lock;
+        if (!g_initialized) {
+            return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
+        }
+        const auto ctx_it = g_contexts.find(ctxId);
+        if (ctx_it == g_contexts.end() || !ctx_it->second.active) {
+            return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
+        }
+        if (std::memcmp(&ctx_it->second.owner_npid, &peer_npid, sizeof(peer_npid)) == 0) {
+            return ORBIS_NP_SIGNALING_ERROR_OWN_NP_ID;
+        }
+        if (!ConsumeActivationBudgetGatedLocked(ctx_it->second)) {
+            return ORBIS_NP_SIGNALING_ERROR_EXCEED_RATE_LIMIT;
+        }
+
+        const CtxNpIdKey lookup_key = MakeCtxNpIdKey(ctxId, peer_npid);
+        const auto existing_it = g_npid_to_conn.find(lookup_key);
+        if (existing_it != g_npid_to_conn.end()) {
+            const auto conn_it = g_connections.find(existing_it->second);
+            if (conn_it != g_connections.end() && conn_it->second.state == ConnState::Inactive) {
+                RemoveConnectionLocked(existing_it->second);
+            } else if (conn_it != g_connections.end()) {
+                cid = existing_it->second;
+                ConnectionInfo& ci = conn_it->second;
+                const bool was_locally_activated = ci.locally_activated;
+                ci.locally_activated = true;
+                if (ci.state == ConnState::Established) {
+                    ClearLingerAndTimeoutLocked(cid);
+                    reused_established = true;
+                    start_handshake = false;
+                } else {
+                    ClearLingerAndTimeoutLocked(cid);
+                    start_handshake = true;
+                }
+                if (!was_locally_activated) {
+                    queue_activation = true;
+                }
+            }
+        }
+        bool created_new = false;
+        if (cid == 0) {
+            cid = AllocateConnectionIdLocked();
+            if (cid < 0) {
+                return ORBIS_NP_SIGNALING_ERROR_OUT_OF_MEMORY;
+            }
+            ConnectionInfo ci{};
+            ci.conn_id = cid;
+            ci.ctx_id = ctxId;
+            ci.state = ConnState::SendingOffer;
+            ci.status = ORBIS_NP_SIGNALING_CONN_STATUS_PENDING;
+            ci.is_initiator = true;
+            ci.locally_activated = true;
+            ci.npid = peer_npid;
+            ci.online_id = peer_online_id;
+            g_connections[cid] = std::move(ci);
+            g_npid_to_conn[lookup_key] = cid;
+            created_new = true;
+        }
+        if (created_new) {
+            ArmConnectTimeoutLocked(cid);
+            queue_activation = true;
+            start_handshake = true;
+        }
+        if (queue_activation) {
+            QueueActivationLocked(cid, peer_online_id_str, start_handshake);
+        }
+        LOG_INFO(Lib_NpSignaling, "ctxId={} peer='{}' connId={} Status: {}", ctxId,
+                 peer_online_id_str, cid,
+                 created_new          ? "queued, async"
+                 : reused_established ? "queued local activation on established connection"
+                 : queue_activation   ? "queued local activation on existing connection"
+                                      : "reused transient");
     }
 
-    const std::string peer_online_id_str = OnlineIdToString(peer_online_id);
-    const s32 rc = SignalingHandler::ActivateSig1(ctxId, peer_npid, peer_online_id, outConnId);
-    if (rc == ORBIS_OK) {
-        LOG_INFO(Lib_NpSignaling,
-                 "result: t={} ctxId={} peer='{}' rc={:#x} "
-                 "connId={}",
-                 call_time, ctxId, peer_online_id_str, rc, *outConnId);
-    } else {
-        LOG_INFO(Lib_NpSignaling, "result: t={} ctxId={} peer='{}' rc={:#x}", call_time, ctxId,
-                 peer_online_id_str, rc);
+    *outConnId = cid;
+
+    if (queue_activation) {
+        g_dispatch_cv.notify_all();
+        return ORBIS_OK;
     }
-    return rc;
+
+    if (reused_established) {
+        EstablishConnection(cid, false);
+    }
+    return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceNpSignalingActivateConnectionA(
     OrbisNpSignalingContextId ctxId, const OrbisNpSignalingAccountPlatformPair* peerAddr,
     OrbisNpSignalingConnectionId* outConnId) {
-    OrbisNpId peer_npid{};
-    if (peerAddr && peerAddr->accountId != 0 && peerAddr->platformType != 0 && outConnId &&
-        SignalingHandler::FindMatching2MemberNpId(peerAddr->accountId, &peer_npid)) {
-        s32 rc = SignalingHandler::ActivateSig1(ctxId, peer_npid, peer_npid.handle, outConnId);
-        if (rc == ORBIS_NP_SIGNALING_ERROR_OWN_NP_ID) {
-            rc = ORBIS_NP_SIGNALING_ERROR_OWN_PEER_ADDRESS;
-        }
-        LOG_INFO(Lib_NpSignaling,
-                 "ctxId={} accountId={:#x} platform={} peer='{}' rc={:#x} connId={}", ctxId,
-                 peerAddr->accountId, peerAddr->platformType, OnlineIdToString(peer_npid.handle),
-                 rc, rc == ORBIS_OK ? *outConnId : 0);
-        return rc;
-    }
-
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!peerAddr || peerAddr->accountId == 0 || !outConnId || peerAddr->platformType == 0) {
         return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
     }
 
-    const auto ctx_it = NpHandler::GetInstance().GetSignalingState().contexts.find(ctxId);
-    if (ctx_it == NpHandler::GetInstance().GetSignalingState().contexts.end() ||
-        !ctx_it->second.active) {
+    const auto ctx_it = g_contexts.find(ctxId);
+    if (ctx_it == g_contexts.end() || !ctx_it->second.active) {
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
     if ((ctx_it->second.flags & 0x4) != 0 && ctx_it->second.account_id == peerAddr->accountId &&
@@ -367,7 +422,7 @@ s32 PS4_SYSV_ABI sceNpSignalingActivateConnectionA(
     ci.conn_id = cid;
     ci.ctx_id = ctxId;
     ci.status = ORBIS_NP_SIGNALING_CONN_STATUS_PENDING;
-    NpHandler::GetInstance().GetSignalingState().connections[cid] = std::move(ci);
+    g_connections[cid] = std::move(ci);
     *outConnId = cid;
 
     LOG_INFO(Lib_NpSignaling, "ctxId={} accountId={:#x} platform={} connId={}", ctxId,
@@ -379,23 +434,22 @@ s32 PS4_SYSV_ABI sceNpSignalingDeactivateConnection(OrbisNpSignalingContextId ct
                                                     OrbisNpSignalingConnectionId connId) {
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
         if (!IsContextValidLocked(ctxId)) {
             return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
         }
 
-        const auto it = NpHandler::GetInstance().GetSignalingState().connections.find(connId);
-        if (it == NpHandler::GetInstance().GetSignalingState().connections.end() ||
-            it->second.ctx_id != ctxId) {
+        const auto it = g_connections.find(connId);
+        if (it == g_connections.end() || it->second.ctx_id != ctxId) {
             return ORBIS_NP_SIGNALING_ERROR_CONN_NOT_FOUND;
         }
 
         LOG_INFO(Lib_NpSignaling, "t={} ctxId={} connId={} peer='{}' status={}", NowMs(), ctxId,
                  connId, OnlineIdToString(it->second.online_id), it->second.status);
     }
-    SignalingHandler::DeactivateSig1(connId);
+    DeactivateConnectionFaithful(connId);
     return ORBIS_OK;
 }
 
@@ -403,20 +457,19 @@ s32 PS4_SYSV_ABI sceNpSignalingTerminateConnection(OrbisNpSignalingContextId ctx
                                                    OrbisNpSignalingConnectionId connId) {
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
         if (!IsContextValidLocked(ctxId)) {
             return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
         }
-        const auto it = NpHandler::GetInstance().GetSignalingState().connections.find(connId);
-        if (it == NpHandler::GetInstance().GetSignalingState().connections.end() ||
-            it->second.ctx_id != ctxId) {
+        const auto it = g_connections.find(connId);
+        if (it == g_connections.end() || it->second.ctx_id != ctxId) {
             return ORBIS_NP_SIGNALING_ERROR_CONN_NOT_FOUND;
         }
         LOG_INFO(Lib_NpSignaling, "ctxId={} connId={}", ctxId, connId);
     }
-    SignalingHandler::TerminateSig1(connId);
+    TerminateConnectionFaithful(connId);
     {
         SignalingMutexGuard lock;
         RemoveConnectionLocked(connId);
@@ -429,7 +482,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionStatus(OrbisNpSignalingContextId ctx
                                                    u32* outStatus, u32* outPeerAddr,
                                                    u16* outPeerPort) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!outStatus) {
@@ -439,27 +492,20 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionStatus(OrbisNpSignalingContextId ctx
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
 
-    const auto it = NpHandler::GetInstance().GetSignalingState().connections.find(connId);
-    if (it == NpHandler::GetInstance().GetSignalingState().connections.end() ||
-        it->second.ctx_id != ctxId) {
+    const auto it = g_connections.find(connId);
+    if (it == g_connections.end() || it->second.ctx_id != ctxId) {
         *outStatus = ORBIS_NP_SIGNALING_CONN_STATUS_INACTIVE;
         return ORBIS_OK;
     }
 
-    const auto transport_it =
-        NpHandler::GetInstance().GetSignalingState().peer_transports.find(it->second.transport_id);
-    const auto* transport =
-        transport_it != NpHandler::GetInstance().GetSignalingState().peer_transports.end()
-            ? &transport_it->second
-            : nullptr;
     const s32 state = ConnectionStateFromStatus(it->second.status);
     if (state == 10) {
         *outStatus = ORBIS_NP_SIGNALING_CONN_STATUS_ACTIVE;
-        if (outPeerAddr && transport) {
-            *outPeerAddr = transport->addr;
+        if (outPeerAddr) {
+            *outPeerAddr = it->second.addr;
         }
-        if (outPeerPort && transport) {
-            *outPeerPort = transport->port;
+        if (outPeerPort) {
+            *outPeerPort = it->second.port;
         }
     } else if (state != 0) {
         *outStatus = ORBIS_NP_SIGNALING_CONN_STATUS_PENDING;
@@ -476,7 +522,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionInfo(OrbisNpSignalingContextId ctxId
                                                  OrbisNpSignalingConnectionId connId, s32 infoCode,
                                                  void* outInfo) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!outInfo) {
@@ -492,7 +538,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionInfoA(OrbisNpSignalingContextId ctxI
                                                   OrbisNpSignalingConnectionId connId, s32 infoCode,
                                                   void* outInfo) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!outInfo) {
@@ -509,7 +555,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionFromNpId(OrbisNpSignalingContextId c
                                                      OrbisNpSignalingConnectionId* outConnId) {
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
     }
@@ -524,20 +570,19 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionFromNpId(OrbisNpSignalingContextId c
     }
 
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!IsContextValidLocked(ctxId)) {
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
 
-    const auto it = NpHandler::GetInstance().GetSignalingState().npid_to_conn.find(
-        MakeCtxNpIdKey(ctxId, peer_npid));
-    if (it == NpHandler::GetInstance().GetSignalingState().npid_to_conn.end()) {
+    const auto it = g_npid_to_conn.find(MakeCtxNpIdKey(ctxId, peer_npid));
+    if (it == g_npid_to_conn.end()) {
         return ORBIS_NP_SIGNALING_ERROR_CONN_NOT_FOUND;
     }
-    const auto conn_it = NpHandler::GetInstance().GetSignalingState().connections.find(it->second);
-    if (conn_it == NpHandler::GetInstance().GetSignalingState().connections.end()) {
+    const auto conn_it = g_connections.find(it->second);
+    if (conn_it == g_connections.end()) {
         return ORBIS_NP_SIGNALING_ERROR_CONN_NOT_FOUND;
     }
 
@@ -551,7 +596,7 @@ s32 PS4_SYSV_ABI
 sceNpSignalingGetConnectionFromPeerAddress(OrbisNpSignalingContextId ctxId, u32 peerAddr,
                                            u16 peerPort, OrbisNpSignalingConnectionId* outConnId) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!outConnId) {
@@ -561,12 +606,9 @@ sceNpSignalingGetConnectionFromPeerAddress(OrbisNpSignalingContextId ctxId, u32 
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
 
-    for (const auto& [id, ci] : NpHandler::GetInstance().GetSignalingState().connections) {
-        const auto transport_it =
-            NpHandler::GetInstance().GetSignalingState().peer_transports.find(ci.transport_id);
-        if (transport_it != NpHandler::GetInstance().GetSignalingState().peer_transports.end() &&
-            ci.ctx_id == ctxId && transport_it->second.addr == peerAddr &&
-            transport_it->second.port == peerPort && ConnectionStateFromStatus(ci.status) == 10) {
+    for (const auto& [id, ci] : g_connections) {
+        if (ci.ctx_id == ctxId && ci.addr == peerAddr && ci.port == peerPort &&
+            ConnectionStateFromStatus(ci.status) == 10) {
             *outConnId = id;
             LOG_INFO(Lib_NpSignaling, "ctxId={} addr={:#x} port={} connId={}", ctxId, peerAddr,
                      sceNetNtohs(peerPort), id);
@@ -580,15 +622,14 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionFromPeerAddressA(
     OrbisNpSignalingContextId ctxId, const OrbisNpSignalingAccountPlatformPair* peerAddr,
     OrbisNpSignalingConnectionId* outConnId) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!peerAddr || !outConnId) {
         return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
     }
-    const auto ctx_it = NpHandler::GetInstance().GetSignalingState().contexts.find(ctxId);
-    if (ctx_it == NpHandler::GetInstance().GetSignalingState().contexts.end() ||
-        !ctx_it->second.active) {
+    const auto ctx_it = g_contexts.find(ctxId);
+    if (ctx_it == g_contexts.end() || !ctx_it->second.active) {
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
     if ((ctx_it->second.flags & 0x4) == 0) {
@@ -601,11 +642,11 @@ s32 PS4_SYSV_ABI sceNpSignalingGetConnectionFromPeerAddressA(
 s32 PS4_SYSV_ABI sceNpSignalingSetContextOption(OrbisNpSignalingContextId ctxId, s32 optionId,
                                                 s32 optionValue) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
-    const auto it = NpHandler::GetInstance().GetSignalingState().contexts.find(ctxId);
-    if (it == NpHandler::GetInstance().GetSignalingState().contexts.end() || !it->second.active) {
+    const auto it = g_contexts.find(ctxId);
+    if (it == g_contexts.end() || !it->second.active) {
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
     if (optionId != ORBIS_NP_SIGNALING_CONTEXT_OPTION_FLAG) {
@@ -624,14 +665,14 @@ s32 PS4_SYSV_ABI sceNpSignalingSetContextOption(OrbisNpSignalingContextId ctxId,
 s32 PS4_SYSV_ABI sceNpSignalingGetContextOption(OrbisNpSignalingContextId ctxId, s32 optionId,
                                                 s32* outOptionValue) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!outOptionValue) {
         return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
     }
-    const auto it = NpHandler::GetInstance().GetSignalingState().contexts.find(ctxId);
-    if (it == NpHandler::GetInstance().GetSignalingState().contexts.end() || !it->second.active) {
+    const auto it = g_contexts.find(ctxId);
+    if (it == g_contexts.end() || !it->second.active) {
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
     if (optionId != ORBIS_NP_SIGNALING_CONTEXT_OPTION_FLAG) {
@@ -645,7 +686,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetLocalNetInfo(OrbisNpSignalingContextId ctxId,
                                                OrbisNpSignalingNetInfo* info) {
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
     }
@@ -657,14 +698,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetLocalNetInfo(OrbisNpSignalingContextId ctxId,
     }
 
     auto* netinfo = Common::Singleton<NetUtil::NetUtilInternal>::Instance();
-    // GetIp() is empty until something asks for it. RetrieveIp() connects out, so only once.
-    if (netinfo->GetIp().empty()) {
-        netinfo->RetrieveIp();
-    }
     info->localAddr = ParseIpv4Nbo(netinfo->GetIp());
-    if (info->localAddr == 0) {
-        info->localAddr = ParseIpv4Nbo("127.0.0.1");
-    }
 
     NetCtl::OrbisNetCtlNatInfo nat_info{};
     nat_info.size = sizeof(nat_info);
@@ -689,7 +723,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetPeerNetInfo(OrbisNpSignalingContextId ctxId, c
                                               OrbisNpSignalingRequestId* outReqId) {
     {
         SignalingMutexGuard lock;
-        if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+        if (!g_initialized) {
             return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
         }
     }
@@ -722,15 +756,14 @@ s32 PS4_SYSV_ABI sceNpSignalingGetPeerNetInfoA(OrbisNpSignalingContextId ctxId,
                                                const void* peerAccountPayload,
                                                OrbisNpSignalingRequestId* outReqId) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!peerAccountPayload || !outReqId) {
         return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
     }
-    const auto ctx_it = NpHandler::GetInstance().GetSignalingState().contexts.find(ctxId);
-    if (ctx_it == NpHandler::GetInstance().GetSignalingState().contexts.end() ||
-        !ctx_it->second.active) {
+    const auto ctx_it = g_contexts.find(ctxId);
+    if (ctx_it == g_contexts.end() || !ctx_it->second.active) {
         return ORBIS_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     }
     if ((ctx_it->second.flags & 0x4) == 0) {
@@ -747,7 +780,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetPeerNetInfoA(OrbisNpSignalingContextId ctxId,
 
 s32 PS4_SYSV_ABI sceNpSignalingCancelPeerNetInfo(OrbisNpSignalingContextId ctxId, s32 reqOrConnId) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!IsContextValidLocked(ctxId)) {
@@ -764,7 +797,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetPeerNetInfoResult(OrbisNpSignalingContextId ct
                                                     OrbisNpSignalingConnectionId connId,
                                                     OrbisNpSignalingNetInfo* peerNetInfo) {
     SignalingMutexGuard lock;
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!peerNetInfo) {
@@ -791,7 +824,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetPeerNetInfoResult(OrbisNpSignalingContextId ct
 }
 
 s32 PS4_SYSV_ABI sceNpSignalingGetMemoryInfo(OrbisNpSignalingMemoryInfo* info) {
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!info) {
@@ -805,7 +838,7 @@ s32 PS4_SYSV_ABI sceNpSignalingGetMemoryInfo(OrbisNpSignalingMemoryInfo* info) {
 
 s32 PS4_SYSV_ABI
 sceNpSignalingGetConnectionStatistics(OrbisNpSignalingConnectionStatistics* stats) {
-    if (!NpHandler::GetInstance().GetSignalingState().initialized) {
+    if (!g_initialized) {
         return ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     }
     if (!stats) {
@@ -816,6 +849,57 @@ sceNpSignalingGetConnectionStatistics(OrbisNpSignalingConnectionStatistics* stat
                                        &stats->transientConnectionCount,
                                        &stats->establishedConnectionCount);
     return ORBIS_OK;
+}
+
+void RegisterLib(Core::Loader::SymbolsResolver* sym) {
+    LIB_FUNCTION("0UvTFeomAUM", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingActivateConnection);
+    LIB_FUNCTION("ZPLavCKqAB0", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingActivateConnectionA);
+    LIB_FUNCTION("X1G4kkN2R-8", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingCancelPeerNetInfo);
+    LIB_FUNCTION("5yYjEdd4t8Y", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingCreateContext);
+    LIB_FUNCTION("dDLNFdY8dws", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingCreateContextA);
+    LIB_FUNCTION("6UEembipgrM", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingDeactivateConnection);
+    LIB_FUNCTION("hx+LIg-1koI", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingDeleteContext);
+    LIB_FUNCTION("GQ0hqmzj0F4", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetConnectionFromNpId);
+    LIB_FUNCTION("CkPxQjSm018", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetConnectionFromPeerAddress);
+    LIB_FUNCTION("B7cT9aVby7A", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetConnectionFromPeerAddressA);
+    LIB_FUNCTION("AN3h0EBSX7A", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetConnectionInfo);
+    LIB_FUNCTION("rcylknsUDwg", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetConnectionInfoA);
+    LIB_FUNCTION("C6ZNCDTj00Y", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetConnectionStatistics);
+    LIB_FUNCTION("bD-JizUb3JM", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetConnectionStatus);
+    LIB_FUNCTION("npU5V56id34", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetContextOption);
+    LIB_FUNCTION("U8AQMlOFBc8", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetLocalNetInfo);
+    LIB_FUNCTION("tOpqyDyMje4", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetMemoryInfo);
+    LIB_FUNCTION("zFgFHId7vAE", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetPeerNetInfo);
+    LIB_FUNCTION("Shr7bZq8QHY", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetPeerNetInfoA);
+    LIB_FUNCTION("2HajCEGgG4s", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingGetPeerNetInfoResult);
+    LIB_FUNCTION("3KOuC4RmZZU", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingInitialize);
+    LIB_FUNCTION("IHRDvZodPYY", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingSetContextOption);
+    LIB_FUNCTION("NPhw0UXaNrk", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingTerminate);
+    LIB_FUNCTION("b4qaXPzMJxo", "libSceNpSignaling", 1, "libSceNpSignaling",
+                 sceNpSignalingTerminateConnection);
 }
 
 } // namespace Libraries::Np::NpSignaling

@@ -34,7 +34,6 @@
 #include <SDL3/SDL_metal.h>
 #endif
 #include <core/emulator_settings.h>
-#include "core/libraries/keyboard/keyboard.h"
 #include "core/libraries/mouse/sdl_mouse.h"
 
 CMRC_DECLARE(res);
@@ -104,13 +103,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         UNREACHABLE_MSG("Failed to initialize SDL video subsystem: {}", SDL_GetError());
     }
-    // On macOS, the future Intel compatibility environment does not include camera frameworks.
-    // Just skip initializing it entirely, no point in splitting old vs new OS versions here.
-#ifndef __APPLE__
     if (!SDL_Init(SDL_INIT_CAMERA)) {
         LOG_ERROR(Input, "Failed to initialize SDL camera subsystem: {}", SDL_GetError());
     }
-#endif
     SDL_InitSubSystem(SDL_INIT_AUDIO);
 
     SDL_PropertiesID props = SDL_CreateProperties();
@@ -209,7 +204,7 @@ void WindowSDL::WaitEvent() {
         return;
     }
 
-    if (Libraries::Mouse::PushSDLEvent(event) || Libraries::Keyboard::PushSDLEvent(event)) {
+    if (Libraries::Mouse::PushSDLEvent(event)) {
         return;
     }
 

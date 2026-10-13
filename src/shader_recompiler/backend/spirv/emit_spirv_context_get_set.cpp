@@ -6,7 +6,6 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/attribute.h"
-#include "shader_recompiler/ir/microinstruction.h"
 #include "shader_recompiler/ir/patch.h"
 #include "shader_recompiler/runtime_info.h"
 
@@ -47,27 +46,52 @@ static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribu
 }
 
 Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
-    const Id ud_reg{ctx.EmitFlatbufferLoad(ctx.ConstU32(static_cast<u32>(reg)))};
+    const u32 index = ctx.binding.user_data + ctx.info.ud_mask.Index(reg);
+    const u32 half = PushData::UdRegsIndex + (index >> 2);
+    const Id ud_ptr{ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U32[1]),
+                                      ctx.push_data_block, ctx.ConstU32(half),
+                                      ctx.ConstU32(index & 3))};
+    const Id ud_reg{ctx.OpLoad(ctx.U32[1], ud_ptr)};
     ctx.Name(ud_reg, fmt::format("ud_{}", u32(reg)));
     return ud_reg;
 }
 
 Id EmitReadConst(EmitContext& ctx, IR::Inst* inst, Id addr, Id offset) {
     const u32 flatbuf_off_dw = inst->Flags<u32>();
-    // Whether the dynamic path was compiled into this shader is decided by the shader info pass
-    // (see CollectShaderInfoPass) and not by the current global setting: a zero flat buffer offset
-    // means the address could not be flattened and cannot be resolved any other way.
-    if (!ctx.info.uses_dma) {
+    if (!EmulatorSettings.IsDirectMemoryAccessEnabled()) {
         return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
     }
+    // We can only provide a fallback for immediate offsets.
     if (flatbuf_off_dw == 0) {
         return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const_dynamic, addr, offset);
+    } else {
+        return ctx.OpFunctionCall(ctx.U32[1], ctx.read_const, addr, offset,
+                                  ctx.ConstU32(flatbuf_off_dw));
     }
-    return ctx.EmitFlatbufferLoad(ctx.ConstU32(flatbuf_off_dw));
 }
 
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     const auto& buffer = ctx.buffers[handle];
+    const auto& desc = ctx.info.buffers[handle];
+    const auto vsharp = desc.GetSharp(ctx.info);
+    if (vsharp.GetElementSize() == 2) {
+        // Buffer has 2-byte elements. Guest address may be only 2-byte aligned,
+        // causing adjust % 4 == 2. Dword indexing (>>2) would lose the sub-4 precision.
+        // Use word indexing instead: dword_index*2 + word_offset, then assemble U32.
+        const Id word_index = ctx.OpIAdd(ctx.U32[1],
+            ctx.OpShiftLeftLogical(ctx.U32[1], index, ctx.ConstU32(1U)),
+            buffer.Offset(PointerSize::B16));
+        const auto [id, ptr_type] = buffer.Alias(PointerType::U16);
+        const Id lo = ctx.OpLoad(ctx.U16, ctx.OpAccessChain(ptr_type, id,
+                               ctx.u32_zero_value, word_index));
+        const Id hi = ctx.OpLoad(ctx.U16, ctx.OpAccessChain(ptr_type, id,
+                               ctx.u32_zero_value,
+                               ctx.OpIAdd(ctx.U32[1], word_index, ctx.ConstU32(1U))));
+        const Id hi32 = ctx.OpShiftLeftLogical(ctx.U32[1],
+                         ctx.OpUConvert(ctx.U32[1], hi), ctx.ConstU32(16U));
+        return ctx.OpBitwiseOr(ctx.U32[1], ctx.OpUConvert(ctx.U32[1], lo), hi32);
+    }
+    // Existing U32 path (element_size != 2)
     if (const Id offset = buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {
         index = ctx.OpIAdd(ctx.U32[1], index, offset);
     }
@@ -105,13 +129,12 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
         }();
         return param.is_integer ? ctx.OpBitcast(ctx.F32[1], value) : value;
     }
-    if (IR::IsBarycentricCoord(attr) && attr != IR::Attribute::BaryCoordPullModel &&
-        ctx.profile.supports_fragment_shader_barycentric) {
+    if (IR::IsBarycentricCoord(attr) && ctx.profile.supports_fragment_shader_barycentric) {
         ++comp;
     }
     switch (attr) {
     case IR::Attribute::Position0:
-        ASSERT(ctx.sw_stage == SwStage::Geometry);
+        ASSERT(ctx.l_stage == LogicalStage::Geometry);
         return ctx.OpLoad(ctx.F32[1],
                           ctx.OpAccessChain(ctx.input_f32, ctx.gl_in, ctx.ConstU32(index),
                                             ctx.ConstU32(0U), ctx.ConstU32(comp)));
@@ -125,33 +148,15 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
         return ctx.OpLoad(ctx.F32[1],
                           ctx.OpAccessChain(ctx.input_f32, ctx.tess_coord, ctx.ConstU32(1U)));
     case IR::Attribute::BaryCoordSmooth:
-        if (ctx.profile.supports_amd_shader_explicit_vertex_parameter) {
-            return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth,
-                                                            ctx.ConstU32(comp)));
-        } else {
-            return ctx.OpCompositeExtract(ctx.F32[1], ctx.OpLoad(ctx.F32[3], ctx.bary_coord), comp);
-        }
+        return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth,
+                                                        ctx.ConstU32(comp)));
     case IR::Attribute::BaryCoordSmoothCentroid:
-        if (ctx.profile.supports_amd_shader_explicit_vertex_parameter) {
-            return ctx.OpLoad(ctx.F32[1],
-                              ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth_centroid,
-                                                ctx.ConstU32(comp)));
-        } else {
-            return ctx.OpCompositeExtract(
-                ctx.F32[1], ctx.OpInterpolateAtCentroid(ctx.F32[3], ctx.bary_coord), comp);
-        }
+        return ctx.OpLoad(
+            ctx.F32[1],
+            ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth_centroid, ctx.ConstU32(comp)));
     case IR::Attribute::BaryCoordSmoothSample:
-        if (ctx.profile.supports_amd_shader_explicit_vertex_parameter) {
-            return ctx.OpLoad(
-                ctx.F32[1],
-                ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth_sample, ctx.ConstU32(comp)));
-        } else {
-            return ctx.OpCompositeExtract(
-                ctx.F32[1],
-                ctx.OpInterpolateAtSample(ctx.F32[3], ctx.bary_coord,
-                                          ctx.OpLoad(ctx.U32[1], ctx.sample_index)),
-                comp);
-        }
+        return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_smooth_sample,
+                                                        ctx.ConstU32(comp)));
     case IR::Attribute::BaryCoordNoPersp:
         return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_nopersp,
                                                         ctx.ConstU32(comp)));
@@ -159,41 +164,8 @@ Id EmitGetAttribute(EmitContext& ctx, IR::Attribute attr, u32 comp, u32 index) {
         return ctx.OpLoad(
             ctx.F32[1],
             ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_nopersp_sample, ctx.ConstU32(comp)));
-    case IR::Attribute::BaryCoordPullModel: {
-        ASSERT_MSG(comp < 3, "Invalid BaryCoordPullModel component {}", comp);
-
-        if (ctx.profile.supports_amd_shader_explicit_vertex_parameter) {
-            return ctx.OpLoad(
-                ctx.F32[1],
-                ctx.OpAccessChain(ctx.input_f32, ctx.bary_coord_pull_model, ctx.ConstU32(comp)));
-        }
-
-        // FragCoord.w is reciprocal clip W at the fragment center. Perspective barycentrics
-        // are (I/W)/(1/W) and (J/W)/(1/W), so multiplying by FragCoord.w recovers the
-        // pull-model values expected by the guest.
-        const Id inv_w = ctx.OpLoad(
-            ctx.F32[1], ctx.OpAccessChain(ctx.input_f32, ctx.frag_coord, ctx.ConstU32(3U)));
-        if (comp == 2) {
-            return inv_w;
-        }
-        const Id ij =
-            ctx.OpCompositeExtract(ctx.F32[1], ctx.OpLoad(ctx.F32[3], ctx.bary_coord), comp + 1);
-        return ctx.OpFMul(ctx.F32[1], ij, inv_w);
-    }
     default:
         UNREACHABLE_MSG("Read attribute {}", attr);
-    }
-}
-
-Id EmitGetAttributeU1(EmitContext& ctx, IR::Attribute attr, u32 comp) {
-    ASSERT(comp == 0);
-    switch (attr) {
-    case IR::Attribute::IsFrontFace:
-        return ctx.OpLoad(ctx.U1[1], ctx.front_facing);
-    case IR::Attribute::IsHelperInvocation:
-        return ctx.OpLoad(ctx.U1[1], ctx.helper_invocation);
-    default:
-        UNREACHABLE_MSG("Unsupported U1 attribute {}", attr);
     }
 }
 
@@ -203,10 +175,6 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
         return ctx.OpLoad(ctx.U32[1], ctx.vertex_index);
     case IR::Attribute::InstanceId:
         return ctx.OpLoad(ctx.U32[1], ctx.instance_id);
-    case IR::Attribute::BaseVertex:
-        return ctx.OpLoad(ctx.U32[1], ctx.base_vertex);
-    case IR::Attribute::BaseInstance:
-        return ctx.OpLoad(ctx.U32[1], ctx.base_instance);
     case IR::Attribute::WorkgroupIndex:
         return ctx.workgroup_index_id;
     case IR::Attribute::WorkgroupId:
@@ -214,38 +182,33 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
     case IR::Attribute::LocalInvocationId:
         return ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id),
                                       comp);
-    case IR::Attribute::LocalInvocationIndex:
-        return ctx.OpLoad(ctx.U32[1], ctx.local_invocation_index);
+    case IR::Attribute::IsFrontFace:
+        return ctx.OpSelect(ctx.U32[1], ctx.OpLoad(ctx.U1[1], ctx.front_facing), ctx.u32_one_value,
+                            ctx.u32_zero_value);
     case IR::Attribute::SampleIndex:
         return ctx.OpLoad(ctx.U32[1], ctx.sample_index);
-    case IR::Attribute::SampleMask:
-        return ctx.OpLoad(ctx.U32[1],
-                          ctx.OpAccessChain(ctx.input_u32, ctx.sample_mask_in, ctx.u32_zero_value));
     case IR::Attribute::RenderTargetIndex:
         return ctx.OpLoad(ctx.U32[1], ctx.output_layer);
     case IR::Attribute::PrimitiveId:
         return ctx.OpLoad(ctx.U32[1], ctx.primitive_id);
     case IR::Attribute::InvocationId:
-        ASSERT(ctx.info.sw_stage == SwStage::Geometry ||
-               ctx.info.sw_stage == SwStage::TessellationControl);
+        ASSERT(ctx.info.l_stage == LogicalStage::Geometry ||
+               ctx.info.l_stage == LogicalStage::TessellationControl);
         return ctx.OpLoad(ctx.U32[1], ctx.invocation_id);
-    case IR::Attribute::SubgroupLtMask:
-        return ctx.OpLoad(
-            ctx.U32[1], ctx.OpAccessChain(ctx.input_u32, ctx.subgroup_lt_mask, ctx.ConstU32(comp)));
     case IR::Attribute::PatchVertices:
-        ASSERT(ctx.info.sw_stage == SwStage::TessellationControl);
+        ASSERT(ctx.info.l_stage == LogicalStage::TessellationControl);
         return ctx.OpLoad(ctx.U32[1], ctx.patch_vertices);
     case IR::Attribute::PackedHullInvocationInfo: {
-        ASSERT(ctx.info.sw_stage == SwStage::TessellationControl);
+        ASSERT(ctx.info.l_stage == LogicalStage::TessellationControl);
         // [0:8]: patch id within VGT
         // [8:12]: output control point id
         // But 0:8 should be treated as 0 for attribute addressing purposes
-        if (ctx.runtime_info.sw.tcs.IsPassthrough()) {
+        if (ctx.runtime_info.hs_info.IsPassthrough()) {
             // Gcn shader would run with 1 thread, but we need to run a thread for
             // each output control point.
             // If Gcn shader uses this value, we should make sure all threads in the
             // Vulkan shader use 0
-            return ctx.u32_zero_value;
+            return ctx.ConstU32(0u);
         } else {
             const Id invocation_id = ctx.OpLoad(ctx.U32[1], ctx.invocation_id);
             return ctx.OpShiftLeftLogical(ctx.U32[1], invocation_id, ctx.ConstU32(8u));
@@ -267,7 +230,7 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     };
     if (IR::IsParam(attr)) {
         const u32 attr_index{u32(attr) - u32(IR::Attribute::Param0)};
-        if (ctx.hw_stage == HwStage::Local) {
+        if (ctx.stage == Stage::Local) {
             const auto component_ptr = ctx.TypePointer(spv::StorageClass::Output, ctx.F32[1]);
             return op_store(ctx.OpAccessChain(component_ptr, ctx.output_attr_array,
                                               ctx.ConstU32(attr_index), ctx.ConstU32(element)));
@@ -285,10 +248,6 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     if (IR::IsMrt(attr)) {
         const u32 index{u32(attr) - u32(IR::Attribute::RenderTarget0)};
         const auto& info{ctx.frag_outputs.at(index)};
-        if (element < 3 && ctx.runtime_info.hw.fs.color_buffers[index].blend_self_scale) {
-            // Emulates GCN's factor-scaled min/max blend: min/max(src*src, dst*dst).
-            value = ctx.OpFMul(ctx.F32[1], value, value);
-        }
         if (info.num_components == 1) {
             return op_store(info.id);
         } else {
@@ -350,7 +309,8 @@ void EmitSetTcsGenericAttribute(EmitContext& ctx, Id value, Id attr_index, Id co
 Id EmitGetPatch(EmitContext& ctx, IR::Patch patch) {
     const u32 index{IR::GenericPatchIndex(patch)};
     const Id element{ctx.ConstU32(IR::GenericPatchElement(patch))};
-    const Id type{ctx.sw_stage == SwStage::TessellationControl ? ctx.output_f32 : ctx.input_f32};
+    const Id type{ctx.l_stage == LogicalStage::TessellationControl ? ctx.output_f32
+                                                                   : ctx.input_f32};
     const Id pointer{ctx.OpAccessChain(type, ctx.patches.at(index), element)};
     return ctx.OpLoad(ctx.F32[1], pointer);
 }
@@ -557,6 +517,14 @@ void EmitStoreBufferFormatF32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id a
     UNREACHABLE_MSG("SPIR-V instruction");
 }
 
+void EmitGetThreadBitScalarReg(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitSetThreadBitScalarReg(EmitContext& ctx) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
 void EmitGetScalarRegister(EmitContext&) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
@@ -573,19 +541,19 @@ void EmitSetVectorRegister(EmitContext& ctx) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
-void EmitSetVirtualRegister(EmitContext& ctx) {
-    UNREACHABLE_MSG("Unreachable instruction");
-}
-
-void EmitGetVirtualRegister(EmitContext& ctx) {
-    UNREACHABLE_MSG("Unreachable instruction");
-}
-
 void EmitSetGotoVariable(EmitContext&) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
 void EmitGetGotoVariable(EmitContext&) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitSetMaskLaneVariable(EmitContext&) {
+    UNREACHABLE_MSG("Unreachable instruction");
+}
+
+void EmitGetMaskLaneVariable(EmitContext&) {
     UNREACHABLE_MSG("Unreachable instruction");
 }
 

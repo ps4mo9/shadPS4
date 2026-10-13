@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <shared_mutex>
-#include <fmt/format.h>
 #include "audioin_backend.h"
 #include "audioin_error.h"
 #include "common/logging/log.h"

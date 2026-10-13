@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -15,6 +15,8 @@ extern "C" {
 
 namespace Libraries::Videodec2 {
 
+extern std::vector<OrbisVideodec2AvcPictureInfo> gPictureInfos;
+
 class VdecDecoder {
 public:
     VdecDecoder(const OrbisVideodec2DecoderConfigInfo& configInfo,
@@ -30,8 +32,8 @@ private:
     AVFrame* ConvertNV12Frame(AVFrame& frame);
 
 private:
-    AVCodecContext* m_codec_context = nullptr;
-    SwsContext* m_sws_context = nullptr;
+    AVCodecContext* mCodecContext = nullptr;
+    SwsContext* mSwsContext = nullptr;
 };
 
 } // namespace Libraries::Videodec2

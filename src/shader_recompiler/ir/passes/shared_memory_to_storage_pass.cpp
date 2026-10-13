@@ -38,8 +38,6 @@ static bool IsSharedAccess(const IR::Inst& inst) {
     case IR::Opcode::SharedAtomicAnd64:
     case IR::Opcode::SharedAtomicOr64:
     case IR::Opcode::SharedAtomicXor64:
-    case IR::Opcode::SharedAtomicCmpSwap32:
-    case IR::Opcode::SharedAtomicCmpSwap64:
         return true;
     default:
         return false;
@@ -71,7 +69,6 @@ IR::Type CalculateSharedMemoryTypes(IR::Program& program) {
             case IR::Opcode::SharedAtomicAnd32:
             case IR::Opcode::SharedAtomicOr32:
             case IR::Opcode::SharedAtomicXor32:
-            case IR::Opcode::SharedAtomicCmpSwap32:
                 used_types |= IR::Type::U32;
                 break;
             case IR::Opcode::LoadSharedU64:
@@ -87,7 +84,6 @@ IR::Type CalculateSharedMemoryTypes(IR::Program& program) {
             case IR::Opcode::SharedAtomicAnd64:
             case IR::Opcode::SharedAtomicOr64:
             case IR::Opcode::SharedAtomicXor64:
-            case IR::Opcode::SharedAtomicCmpSwap64:
                 used_types |= IR::Type::U64;
                 break;
             default:
@@ -100,7 +96,7 @@ IR::Type CalculateSharedMemoryTypes(IR::Program& program) {
 
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile) {
-    if (program.info.hw_stage != HwStage::Compute) {
+    if (program.info.stage != Stage::Compute) {
         return;
     }
 
@@ -109,7 +105,7 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
     // * One of the following is true:
     //   * Requested shared memory size is too large for the host shared memory.
     //   * Workgroup explicit memory is not supported and multiple shared memory types are used.
-    const u32 shared_memory_size = runtime_info.hw.cs.shared_memory_size;
+    const u32 shared_memory_size = runtime_info.cs_info.shared_memory_size;
     const auto used_types = CalculateSharedMemoryTypes(program);
     if (used_types == IR::Type::Void || (shared_memory_size <= profile.max_shared_memory_size &&
                                          (profile.supports_workgroup_explicit_memory_layout ||
@@ -119,8 +115,9 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
 
     // Add a buffer binding for shared memory storage buffer.
     const u32 binding = static_cast<u32>(program.info.buffers.size());
-    program.info.buffers.push_back(BufferResource{
+    program.info.buffers.push_back({
         .used_types = used_types,
+        .inline_cbuf = AmdGpu::Buffer::Null(),
         .buffer_type = BufferType::SharedMemory,
         .is_written = true,
     });
@@ -183,11 +180,6 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
             case IR::Opcode::SharedAtomicXor32:
             case IR::Opcode::SharedAtomicXor64:
                 inst.ReplaceUsesWithAndRemove(ir.BufferAtomicXor(handle, address, inst.Arg(1), {}));
-                continue;
-            case IR::Opcode::SharedAtomicCmpSwap32:
-            case IR::Opcode::SharedAtomicCmpSwap64:
-                inst.ReplaceUsesWithAndRemove(
-                    ir.BufferAtomicCmpSwap(handle, address, inst.Arg(1), inst.Arg(2), {}));
                 continue;
             case IR::Opcode::LoadSharedU16:
                 inst.ReplaceUsesWithAndRemove(ir.LoadBufferU16(handle, address, {}));

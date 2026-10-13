@@ -8,7 +8,6 @@
 namespace Libraries::Kernel {
 
 void RegisterThreads(Core::Loader::SymbolsResolver* sym) {
-    RegisterBarrier(sym);
     RegisterMutex(sym);
     RegisterCond(sym);
     RegisterRwlock(sym);

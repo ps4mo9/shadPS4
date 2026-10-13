@@ -72,7 +72,7 @@ static std::string ArgToIndex(std::map<const Inst*, size_t>& inst_to_index, size
     if (arg.IsEmpty()) {
         return "<null>";
     }
-    if (!arg.IsImmediate()) {
+    if (!arg.IsImmediate() || arg.IsIdentity()) {
         return fmt::format("%{}", InstIndex(inst_to_index, inst_index, arg.Inst()));
     }
     switch (arg.Type()) {
@@ -92,39 +92,12 @@ static std::string ArgToIndex(std::map<const Inst*, size_t>& inst_to_index, size
         return fmt::format("{}", arg.ScalarReg());
     case Type::VectorReg:
         return fmt::format("{}", arg.VectorReg());
-    case Type::VirtualReg:
-        return fmt::format("{}", arg.VirtualReg());
     case Type::Attribute:
         return fmt::format("{}", arg.Attribute());
     case Type::Patch:
         return fmt::format("{}", arg.Patch());
     default:
         return "<unknown immediate type>";
-    }
-}
-
-static std::string RegTagInfo(const RegTag tag) {
-    switch (tag.type) {
-    case RegType::ScalarReg:
-        return fmt::format("{}", tag.sreg);
-    case RegType::VectorReg:
-        return fmt::format("{}", tag.vreg);
-    case RegType::VirtualReg:
-        return fmt::format("{}", tag.reg);
-    case RegType::GotoVariable:
-        return fmt::format("GOTO{}", tag.index);
-    case RegType::VccLo:
-        return "VCC_LO";
-    case RegType::VccHi:
-        return "VCC_HI";
-    case RegType::Exec:
-        return "EXEC";
-    case RegType::Scc:
-        return "SCC";
-    case RegType::M0:
-        return "M0";
-    default:
-        UNREACHABLE();
     }
 }
 
@@ -140,17 +113,7 @@ std::string DumpBlock(const Block& block, const std::map<const Block*, size_t>& 
     if (const auto it{block_to_index.find(&block)}; it != block_to_index.end()) {
         ret += fmt::format(" ${}", it->second);
     }
-    ret += " predecessors [";
-    for (auto* block : block.ImmPredecessors()) {
-        const auto it{block_to_index.find(block)};
-        ASSERT(it != block_to_index.end());
-        ret += fmt::format("${}, ", it->second);
-    }
-    if (!block.ImmPredecessors().empty()) {
-        ret.pop_back();
-        ret.pop_back();
-    }
-    ret += "]\n";
+    ret += '\n';
     for (const Inst& inst : block) {
         const Opcode op{inst.GetOpcode()};
         ret += fmt::format("[{:016x}] ", reinterpret_cast<u64>(&inst));
@@ -162,10 +125,6 @@ std::string DumpBlock(const Block& block, const std::map<const Block*, size_t>& 
 
         if (op == Opcode::ReadConst || op == Opcode::ImageSampleRaw) {
             ret += fmt::format(" (flags={:#x}) ", inst.Flags<u32>());
-        } else if (op == Opcode::ReadConstBuffer) {
-            const auto info = inst.Flags<BufferInstInfo>();
-            ret += fmt::format(" (sharp_source={}, flatbuf_off_dw={:#x}) ", bool(info.sharp_source),
-                               info.flatbuf_off_dw.Value());
         }
         const size_t arg_count{inst.NumArgs()};
         for (size_t arg_index = 0; arg_index < arg_count; ++arg_index) {
@@ -187,14 +146,7 @@ std::string DumpBlock(const Block& block, const std::map<const Block*, size_t>& 
             }
         }
         if (TypeOf(op) != Type::Void) {
-            ret += fmt::format(" (uses: {})", inst.UseCount());
-            if (auto tag = inst.GetRegTag()) {
-                ret += fmt::format(" (tag: {})", RegTagInfo(tag));
-            }
-            if (op == Opcode::Phi) {
-                ret += fmt::format(" (scc{})", inst.scc_index);
-            }
-            ret += '\n';
+            ret += fmt::format(" (uses: {})\n", inst.UseCount());
         } else {
             ret += '\n';
         }

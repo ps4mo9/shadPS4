@@ -10,7 +10,6 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
-#include "core/cpu_patches.h"
 #include "core/devtools/layer.h"
 #include "imgui/imgui_std.h"
 #include "settings_dialog_imgui.h"
@@ -32,14 +31,8 @@ int SettingsWindow::GetComboIndex(std::string selection, std::vector<std::string
 }
 
 void SettingsWindow::LoadSettings(std::string profile) {
-    // Global-only settings
-    EmulatorSettings.Load();
-    scanDepthSetting = EmulatorSettings.GetBigPictureFolderDepth();
-
     const bool isSpecific = currentProfile != "Global";
-    if (isSpecific) {
-        EmulatorSettings.Load(profile);
-    }
+    isSpecific ? EmulatorSettings.Load(profile) : EmulatorSettings.Load();
 
     /////////// General Tab
     int languageIndex = EmulatorSettings.GetConsoleLanguage();
@@ -49,6 +42,7 @@ void SettingsWindow::LoadSettings(std::string profile) {
             language = key;
         }
     }
+
     consoleLanguageSetting = GetComboIndex(language, languageOptions);
     volumeSetting = EmulatorSettings.GetVolumeSlider();
     showSplashSetting = EmulatorSettings.IsShowSplash();
@@ -87,7 +81,6 @@ void SettingsWindow::LoadSettings(std::string profile) {
         readbacksModeSetting = EmulatorSettings.GetReadbacksMode();
         readbackLinearImagesSetting = EmulatorSettings.IsReadbackLinearImagesEnabled();
         directMemoryAccessSetting = EmulatorSettings.IsDirectMemoryAccessEnabled();
-        windowsGuestRedZoneProtectionModeSetting = EmulatorSettings.IsRedZonePatchingEnabled();
         devkitConsoleSetting = EmulatorSettings.IsDevKit();
         neoModeSetting = EmulatorSettings.IsNeo();
         shadnetEnabledSetting = EmulatorSettings.IsShadNetEnabledSetting();
@@ -143,8 +136,6 @@ void SettingsWindow::SaveSettings(std::string profile) {
         EmulatorSettings.SetReadbacksMode(readbacksModeSetting, true);
         EmulatorSettings.SetReadbackLinearImagesEnabled(readbackLinearImagesSetting, true);
         EmulatorSettings.SetDirectMemoryAccessEnabled(directMemoryAccessSetting, true);
-        // Windows static guest red-zone protection
-        EmulatorSettings.SetRedZonePatchingEnabled(windowsGuestRedZoneProtectionModeSetting, true);
         EmulatorSettings.SetDevKit(devkitConsoleSetting, true);
         EmulatorSettings.SetNeo(neoModeSetting, true);
         EmulatorSettings.SetShadNetEnabled(shadnetEnabledSetting, true);
@@ -314,13 +305,11 @@ void SettingsWindow::DrawCategoryTabs() {
 
     float vertSize = (settingsIconSize * uiScale + ImGui::CalcTextSize("Profiles").y) +
                      ImGui::GetStyle().FramePadding.y * 4.f + 20.0 * uiScale;
-    ImGuiChildFlags child_flags = ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened;
-
-    ImGuiWindowFlags window_flags =
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
-
-    ImGui::BeginChild("Categories", ImVec2(0, vertSize), child_flags, window_flags);
+    ImGuiWindowFlags child_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NavFlattened;
+    ImGui::BeginChild("Categories", ImVec2(0, vertSize), true,
+                      child_flags | ImGuiWindowFlags_HorizontalScrollbar |
+                          ImGuiWindowFlags_NoScrollWithMouse);
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(30.0f * uiScale, 0.0f));
 
@@ -383,6 +372,8 @@ void SettingsWindow::AddCategory(std::string name,
 void SettingsWindow::DrawMainContent(bool* open, const std::function<void()>& applySettings) {
     ImVec4 settingsColor = ImVec4(0.1f, 0.1f, 0.12f, 0.8f); // Darker gray
     ImGui::PushStyleColor(ImGuiCol_ChildBg, settingsColor);
+    ImGuiWindowFlags child_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NavFlattened;
 
     std::string centeredText;
     currentCategory == SettingsCategory::Folders
@@ -473,20 +464,16 @@ void SettingsWindow::DrawMainContent(bool* open, const std::function<void()>& ap
 }
 
 void SettingsWindow::DrawProfileSelector() {
-    ImGuiChildFlags child_flags = ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened;
-
-    ImGuiWindowFlags window_flags =
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
-
+    ImGuiWindowFlags child_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NavFlattened;
     ImVec4 settingsColor = ImVec4(0.1f, 0.1f, 0.12f, 0.8f); // Darker gray
     ImGui::PushStyleColor(ImGuiCol_ChildBg, settingsColor);
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
 
-    ImGui::BeginChild("Profile Selection", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()),
-                      child_flags, window_flags);
-
+    ImGui::BeginChild("Profile Selection", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), true,
+                      child_flags);
     ImGui::PopStyleColor();
 
     if (ImGui::BeginTable("ProfilesTable", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders)) {
@@ -518,10 +505,8 @@ void SettingsWindow::DrawProfileSelector() {
             }
 
             ImGui::TableNextColumn();
-            std::string profileLabel = i == 0
-                                           ? "Global"
-                                           : profileIcons[i].serial + " - " +
-                                                 profileIcons[i].title + "##" + std::to_string(i);
+            std::string profileLabel =
+                i == 0 ? "Global" : profileIcons[i].serial + " - " + profileIcons[i].title;
             if (ImGui::Button(profileLabel.c_str(),
                               ImVec2(ImGui::GetContentRegionAvail().x, 0.0f))) {
 
@@ -583,13 +568,10 @@ void SettingsWindow::DrawProfileSelector() {
 }
 
 void SettingsWindow::DrawGameFolderManager() {
-    ImGuiChildFlags child_flags = ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened;
-
-    ImGuiWindowFlags window_flags =
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
-
-    ImGui::BeginChild("ContentRegion", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), child_flags,
-                      window_flags);
+    ImGuiWindowFlags child_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NavFlattened;
+    ImGui::BeginChild("ContentRegion", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), true,
+                      child_flags);
 
     if (ImGui::Button("Add Folder", ImVec2(400.f * uiScale, 0))) {
         ImGuiFileDialog::Instance()->OpenDialog("OpenFolder", "Add shadPS4 game folder", nullptr,
@@ -601,29 +583,6 @@ void SettingsWindow::DrawGameFolderManager() {
         ImGui::SetNextWindowPos(viewport->Pos);
         ImGui::SetNextWindowSize(viewport->Size);
     }
-
-    float buttonWidth = ImGui::GetItemRectSize().x;
-    ImGui::PushItemWidth(buttonWidth);
-    if (ImGui::SliderInt("Folder Scan Depth", &scanDepthSetting, 0, 5)) {
-        std::string profile;
-        const bool isGlobal = currentProfile == "Global";
-        if (!isGlobal) {
-            profile = currentProfile.substr(0, 9);
-            EmulatorSettings.Load();
-        }
-
-        EmulatorSettings.SetBigPictureFolderDepth(scanDepthSetting);
-        EmulatorSettings.Save();
-
-        if (!isGlobal) {
-            EmulatorSettings.Load(profile);
-        }
-
-        if (!isGameRunning) {
-            GetProfileInfo();
-        }
-    }
-    ImGui::PopItemWidth();
 
     if (ImGuiFileDialog::Instance()->Display("OpenFolder", child_flags | ImGuiWindowFlags_NoMove)) {
         if (ImGuiFileDialog::Instance()->IsOk()) {
@@ -692,13 +651,11 @@ void SettingsWindow::DrawGameFolderManager() {
 
 void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f * uiScale, 10.0f * uiScale));
-    ImGuiChildFlags child_flags = ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened;
+    ImGuiWindowFlags child_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NavFlattened;
 
-    ImGuiWindowFlags window_flags =
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
-
-    ImGui::BeginChild("ContentRegion", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), child_flags,
-                      window_flags);
+    ImGui::BeginChild("ContentRegion", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), true,
+                      child_flags);
 
     if (category == SettingsCategory::General) {
         if (ImGui::BeginTable("SettingsTable", 2)) {
@@ -787,11 +744,6 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             AddSettingCombo("Readbacks Mode", readbacksModeSetting, readbacksModeOptions);
             AddSettingCheckbox("Enable Readback Linear Images", readbackLinearImagesSetting);
             AddSettingCheckbox("Enable Direct Memory Access", directMemoryAccessSetting);
-#ifdef _WIN32
-            // Windows static guest red-zone protection
-            AddSettingCheckbox("Windows Guest Red Zone Protection (Requires Restart)",
-                               windowsGuestRedZoneProtectionModeSetting);
-#endif
             AddSettingCheckbox("Enable Devkit Console Mode", devkitConsoleSetting);
             AddSettingCheckbox("Enable PS4 Neo Mode", neoModeSetting);
             AddSettingCheckbox("Enable ShadNet", shadnetEnabledSetting);

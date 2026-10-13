@@ -24,6 +24,7 @@
 // SDL_Renderer data
 struct ImGui_ImplSDLRenderer3_Data {
     SDL_Renderer* Renderer; // Main viewport's renderer
+    SDL_Texture* FontTexture;
     ImVector<SDL_FColor> ColorBuffer;
 
     ImGui_ImplSDLRenderer3_Data() {
@@ -54,7 +55,6 @@ bool ImGui_ImplSDLRenderer3_Init(SDL_Renderer* renderer) {
     io.BackendFlags |=
         ImGuiBackendFlags_RendererHasVtxOffset; // We can honor the ImDrawCmd::VtxOffset
                                                 // field, allowing for large meshes.
-    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // Dynamic font atlas
 
     bd->Renderer = renderer;
 
@@ -70,8 +70,7 @@ void ImGui_ImplSDLRenderer3_Shutdown() {
 
     io.BackendRendererName = nullptr;
     io.BackendRendererUserData = nullptr;
-    io.BackendFlags &=
-        ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
+    io.BackendFlags &= ~ImGuiBackendFlags_RendererHasVtxOffset;
     IM_DELETE(bd);
 }
 
@@ -87,7 +86,9 @@ void ImGui_ImplSDLRenderer3_NewFrame() {
     ImGui_ImplSDLRenderer3_Data* bd = ImGui_ImplSDLRenderer3_GetBackendData();
     IM_ASSERT(bd != nullptr &&
               "Context or backend not initialized! Did you call ImGui_ImplSDLRenderer3_Init()?");
-    IM_UNUSED(bd);
+
+    if (!bd->FontTexture)
+        ImGui_ImplSDLRenderer3_CreateDeviceObjects();
 }
 
 // https://github.com/libsdl-org/SDL/issues/9009
@@ -131,12 +132,6 @@ void ImGui_ImplSDLRenderer3_RenderDrawData(ImDrawData* draw_data, SDL_Renderer* 
     int fb_height = (int)(draw_data->DisplaySize.y * render_scale.y);
     if (fb_width == 0 || fb_height == 0)
         return;
-
-    // Catch up with texture updates. Usually, the list has 1 element with an OK status.
-    if (draw_data->Textures != nullptr)
-        for (ImTextureData* tex : *draw_data->Textures)
-            if (tex->Status != ImTextureStatus_OK)
-                ImGui_ImplSDLRenderer3_UpdateTexture(tex);
 
     // Backup SDL_Renderer state that will be modified to restore it afterwards
     struct BackupSDLRendererState {
@@ -232,57 +227,57 @@ void ImGui_ImplSDLRenderer3_RenderDrawData(ImDrawData* draw_data, SDL_Renderer* 
     SDL_SetRenderClipRect(renderer, old.ClipEnabled ? &old.ClipRect : nullptr);
 }
 
-void ImGui_ImplSDLRenderer3_UpdateTexture(ImTextureData* tex) {
+// Called by Init/NewFrame/Shutdown
+bool ImGui_ImplSDLRenderer3_CreateFontsTexture() {
+    ImGuiIO& io = ImGui::GetIO();
     ImGui_ImplSDLRenderer3_Data* bd = ImGui_ImplSDLRenderer3_GetBackendData();
 
-    if (tex->Status == ImTextureStatus_WantCreate) {
-        // Create and upload new texture to graphics system
-        IM_ASSERT(tex->TexID == ImTextureID_Invalid && tex->BackendUserData == nullptr);
-        IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
+    // Build texture atlas
+    unsigned char* pixels;
+    int width, height;
+    io.Fonts->GetTexDataAsRGBA32(
+        &pixels, &width,
+        &height); // Load as RGBA 32-bit (75% of the memory is wasted, but default font is so small)
+                  // because it is more likely to be compatible with user's existing shaders. If
+                  // your ImTextureId represent a higher-level concept than just a GL texture id,
+                  // consider calling GetTexDataAsAlpha8() instead to save on GPU memory.
 
-        // Create texture (bilinear sampling is required)
-        SDL_Texture* sdl_texture =
-            SDL_CreateTexture(bd->Renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC,
-                              tex->Width, tex->Height);
-        IM_ASSERT(sdl_texture != nullptr && "Backend failed to create texture!");
-        SDL_UpdateTexture(sdl_texture, nullptr, tex->GetPixels(), tex->GetPitch());
-        SDL_SetTextureBlendMode(sdl_texture, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(sdl_texture, SDL_SCALEMODE_LINEAR);
-
-        // Store identifiers
-        tex->SetTexID((ImTextureID)(intptr_t)sdl_texture);
-        tex->SetStatus(ImTextureStatus_OK);
-    } else if (tex->Status == ImTextureStatus_WantUpdates) {
-        // Update selected blocks. Write to textures regions never used before.
-        SDL_Texture* sdl_texture = (SDL_Texture*)(intptr_t)tex->TexID;
-        for (ImTextureRect& r : tex->Updates) {
-            SDL_Rect sdl_r = {r.x, r.y, r.w, r.h};
-            SDL_UpdateTexture(sdl_texture, &sdl_r, tex->GetPixelsAt(r.x, r.y), tex->GetPitch());
-        }
-        tex->SetStatus(ImTextureStatus_OK);
-    } else if (tex->Status == ImTextureStatus_WantDestroy) {
-        if (tex->TexID != ImTextureID_Invalid)
-            if (SDL_Texture* sdl_texture = (SDL_Texture*)(intptr_t)tex->TexID)
-                SDL_DestroyTexture(sdl_texture);
-
-        // Clear identifiers and mark as destroyed
-        tex->SetTexID(ImTextureID_Invalid);
-        tex->SetStatus(ImTextureStatus_Destroyed);
+    // Upload texture to graphics system
+    // (Bilinear sampling is required by default. Set 'io.Fonts->Flags |=
+    // ImFontAtlasFlags_NoBakedLines' or 'style.AntiAliasedLinesUseTex = false' to allow
+    // point/nearest sampling)
+    bd->FontTexture = SDL_CreateTexture(bd->Renderer, SDL_PIXELFORMAT_RGBA32,
+                                        SDL_TEXTUREACCESS_STATIC, width, height);
+    if (bd->FontTexture == nullptr) {
+        SDL_Log("error creating texture");
+        return false;
     }
-}
+    SDL_UpdateTexture(bd->FontTexture, nullptr, pixels, 4 * width);
+    SDL_SetTextureBlendMode(bd->FontTexture, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(bd->FontTexture, SDL_SCALEMODE_LINEAR);
 
-// Called by Init/NewFrame/Shutdown
-bool ImGui_ImplSDLRenderer3_CreateDeviceObjects() {
+    // Store our identifier
+    io.Fonts->SetTexID((ImTextureID)(intptr_t)bd->FontTexture);
+
     return true;
 }
 
+void ImGui_ImplSDLRenderer3_DestroyFontsTexture() {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui_ImplSDLRenderer3_Data* bd = ImGui_ImplSDLRenderer3_GetBackendData();
+    if (bd->FontTexture) {
+        io.Fonts->SetTexID(0);
+        SDL_DestroyTexture(bd->FontTexture);
+        bd->FontTexture = nullptr;
+    }
+}
+
+bool ImGui_ImplSDLRenderer3_CreateDeviceObjects() {
+    return ImGui_ImplSDLRenderer3_CreateFontsTexture();
+}
+
 void ImGui_ImplSDLRenderer3_DestroyDeviceObjects() {
-    // Destroy all textures
-    for (ImTextureData* tex : ImGui::GetPlatformIO().Textures)
-        if (tex->RefCount == 1) {
-            tex->SetStatus(ImTextureStatus_WantDestroy);
-            ImGui_ImplSDLRenderer3_UpdateTexture(tex);
-        }
+    ImGui_ImplSDLRenderer3_DestroyFontsTexture();
 }
 
 //-----------------------------------------------------------------------------

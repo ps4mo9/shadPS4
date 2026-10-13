@@ -18,7 +18,6 @@ struct Program {
     BlockList blocks;
     BlockList post_order_blocks;
     std::vector<Gcn::GcnInst> ins_list;
-    u32 next_reg_index{};
     Info& info;
 };
 

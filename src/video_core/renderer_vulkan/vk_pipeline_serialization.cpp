@@ -12,9 +12,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 9u;
-static constexpr u32 ShaderMetaVersion = 6u;
-static constexpr u32 PipelineKeyVersion = 3u;
+static constexpr u32 ShaderBinaryVersion = 2u;
+static constexpr u32 ShaderMetaVersion = 3u;
+static constexpr u32 PipelineKeyVersion = 2u;
 } // namespace Serialization
 
 namespace Vulkan {
@@ -92,6 +92,7 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
 }
 
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
+                    std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
                     Shader::StageSpecialization& spec, size_t& perm_idx) {
     Serialization::Reader meta{ar};
 
@@ -113,6 +114,8 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     spec.Deserialize(ar);
     info.Deserialize(ar);
+
+    fetch_shader_data = spec.fetch_shader_data;
     return true;
 }
 
@@ -211,6 +214,30 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     GraphicsPipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
 
+    // Load the companion auxiliary geometry shader by its interface-format signature BEFORE the
+    // game stages. It is a dedicated AuxiliaryShader blob keyed by graphics_key.aux_gs_signature.
+    // A missing blob invalidates the whole pipeline (an FS restored to per-vertex would otherwise
+    // have no GS to supply its inputs). Doing this before the stage loop matters: on failure it
+    // returns false while no stage has entered program_cache yet, so the runtime draw re-translates
+    // the FS from the original code and re-generates the aux GS (self-heal). Loading it after the
+    // loop would leave the FS in program_cache, so the draw path would reuse the cached FS without
+    // ever re-generating the missing aux GS and FillAuxGSModule would assert.
+    if (graphics_key.aux_gs_signature != 0) {
+        if (!aux_gs_cache.contains(graphics_key.aux_gs_signature)) {
+            std::vector<u32> aux_gs_spv{};
+            Storage::DataBase::Instance().Load(
+                Storage::BlobType::AuxiliaryShader,
+                fmt::format("{:#018x}_ag", graphics_key.aux_gs_signature), aux_gs_spv);
+            if (aux_gs_spv.empty()) {
+                return false;
+            }
+            aux_gs_cache[graphics_key.aux_gs_signature] =
+                CompileSPV(aux_gs_spv, instance.GetDevice());
+            LOG_INFO(Render_Vulkan, "Loaded per-vertex aux GS (signature {:#x}) from cache",
+                     graphics_key.aux_gs_signature);
+        }
+    }
+
     for (int stage_idx = 0; stage_idx < MaxShaderStages; ++stage_idx) {
         const auto& hash = graphics_key.stage_hashes[stage_idx];
         if (!hash) {
@@ -234,13 +261,15 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     ASSERT(is_new);
 
+    FillAuxGSModule();
+
     it.value() = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
         runtime_infos, fetch_shader, modules, sdata, true);
 
     infos.fill(nullptr);
     modules.fill(nullptr);
-    fetch_shader = nullptr;
+    fetch_shader.reset();
 
     return true;
 }
@@ -250,7 +279,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
     size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, spec, perm_idx)) {
+    if (!LoadShaderMeta(ar, program->info, fetch_shader, spec, perm_idx)) {
         return false;
     }
 
@@ -274,17 +303,10 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     } else {
         const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
         if (it != it_pgm.value()->modules.end()) {
-            // A matching permutation is valid only at its original index. A different index means
-            // the store holds entries from more than one cache generation, so this pipeline is
-            // left to compile at runtime.
+            // If the permutation is already preloaded, make sure it has the same permutation index
             const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            if (perm_idx != idx) {
-                LOG_WARNING(Render_Vulkan,
-                            "Cached permutation {} of {}_{:x} conflicts with index {}, skipping "
-                            "preload",
-                            perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
-                return false;
-            }
+            ASSERT_MSG(perm_idx == idx, "Permutation {} is already inserted at {}! ({}_{:x})",
+                       perm_idx, idx, program->info.stage, program->info.pgm_hash);
             module = it->module;
         } else {
             module = CompileSPV(spv, instance.GetDevice());
@@ -294,9 +316,6 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
 
     infos[stage] = &it_pgm.value()->info;
     modules[stage] = module;
-    if (auto& fetch = it_pgm.value()->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
-        fetch_shader = &fetch;
-    }
 
     return true;
 }
@@ -399,6 +418,15 @@ bool Info::Deserialize(Serialization::Archive& ar) {
     info.Read(this, sizeof(Shader::InfoPersistent));
     info.Read(flattened_ud_buf);
 
+    // is_srt_offset is serialized as part of ImageResource; recompute the derived flag.
+    has_srt_offset = false;
+    for (const auto& image : images) {
+        if (image.is_srt_offset) {
+            has_srt_offset = true;
+            break;
+        }
+    }
+
     return srt_info.Deserialize(ar);
 }
 
@@ -453,9 +481,9 @@ void StageSpecialization::Serialize(Serialization::Archive& ar) const {
 
     spec.Write(bitset.to_string());
 
-    if (!fetch_shader_data.Empty()) {
-        spec.Write(sizeof(fetch_shader_data));
-        fetch_shader_data.Serialize(ar);
+    if (fetch_shader_data) {
+        spec.Write(sizeof(*fetch_shader_data));
+        fetch_shader_data->Serialize(ar);
     } else {
         spec.Write(size_t{0});
     }
@@ -465,6 +493,7 @@ void StageSpecialization::Serialize(Serialization::Archive& ar) const {
     spec.Write(images);
     spec.Write(fmasks);
     spec.Write(samplers);
+    spec.Write(aux_gs_signature);
 }
 
 bool StageSpecialization::Deserialize(Serialization::Archive& ar) {
@@ -491,6 +520,7 @@ bool StageSpecialization::Deserialize(Serialization::Archive& ar) {
     spec.Read(images);
     spec.Read(fmasks);
     spec.Read(samplers);
+    spec.Read(aux_gs_signature);
 
     return true;
 }

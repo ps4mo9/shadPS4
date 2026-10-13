@@ -3,7 +3,6 @@
 
 #include "common/arch.h"
 #include "common/assert.h"
-#include "core/signals.h"
 #include "emulator.h"
 
 #if defined(ARCH_X86_64)
@@ -15,7 +14,6 @@
 #endif
 
 void assert_fail_impl() {
-    Core::Signals::Instance()->RemoveHandlers();
     Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     Crash();
 }

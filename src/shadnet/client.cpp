@@ -5,12 +5,10 @@
 #include <algorithm>
 #include <chrono>
 #include <thread>
-#include <fmt/format.h>
 
 #include "client.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
-#include "common/scm_rev.h"
 #include "common/thread.h"
 #include "shadnet.pb.h"
 
@@ -133,9 +131,6 @@ const std::string& ShadNetClient::GetAvatarUrl() const {
 u64 ShadNetClient::GetUserId() const {
     return m_user_id;
 }
-const std::string& ShadNetClient::GetNpid() const {
-    return m_npid;
-}
 u32 ShadNetClient::GetAddrLocal() const {
     return m_addr_local.load();
 }
@@ -217,17 +212,8 @@ void ShadNetClient::ConnectThread() {
     LOG_INFO(ShadNet, "Login packet sent for '{}'", m_npid);
 }
 
-namespace {
-thread_local bool t_reader_thread = false;
-}
-
-bool ShadNetClient::OnReaderThread() {
-    return t_reader_thread;
-}
-
 void ShadNetClient::ReaderThread() {
     Common::SetCurrentThreadName("ShadNet:Reader");
-    t_reader_thread = true;
     while (!m_terminate) {
         u8 hdr[SHAD_HEADER_SIZE];
         if (!RecvN(hdr, SHAD_HEADER_SIZE)) {
@@ -538,81 +524,6 @@ u64 ShadNetClient::SetAppearOffline(bool enable) {
     return SubmitRequest(CommandType::SetAppearOffline, MakeProtoPayload(req));
 }
 
-u64 ShadNetClient::LookupOnlineId(const std::string& npid) {
-    shadnet::LookupOnlineIdRequest req;
-    req.set_npid(npid);
-    return SubmitRequest(CommandType::LookupOnlineId, MakeProtoPayload(req));
-}
-
-static std::vector<u8> MakeComIdPayload(const std::string& com_id, const std::string& proto_bytes) {
-    std::vector<u8> payload;
-    payload.reserve(12 + 4 + proto_bytes.size());
-    payload.insert(payload.end(), com_id.begin(), com_id.end());
-    const u32 sz = static_cast<u32>(proto_bytes.size());
-    payload.push_back(static_cast<u8>(sz));
-    payload.push_back(static_cast<u8>(sz >> 8));
-    payload.push_back(static_cast<u8>(sz >> 16));
-    payload.push_back(static_cast<u8>(sz >> 24));
-    payload.insert(payload.end(), proto_bytes.begin(), proto_bytes.end());
-    return payload;
-}
-
-std::string ShadNetClient::BuildVersionString() {
-    const std::string remote_url(Common::g_scm_remote_url);
-    const std::string remote_host = Common::GetRemoteNameFromLink();
-    const bool official = (remote_host == "shadps4-emu" || remote_url.empty());
-
-    if (Common::g_is_release) {
-        return official ? fmt::format("shadPS4 v{}", Common::g_version)
-                        : fmt::format("shadPS4 {}/v{}", remote_host, Common::g_version);
-    }
-    return official ? fmt::format("shadPS4 v{} {} {}", Common::g_version, Common::g_scm_branch,
-                                  Common::g_scm_desc)
-                    : fmt::format("shadPS4 v{} {}/{} {}", Common::g_version, remote_host,
-                                  Common::g_scm_branch, Common::g_scm_desc);
-}
-
-u64 ShadNetClient::ReportClientVersion() {
-    shadnet::SetClientVersionRequest req;
-    req.set_version(BuildVersionString());
-    const std::string blob = req.SerializeAsString();
-
-    std::vector<u8> payload;
-    payload.reserve(4 + blob.size());
-    const u32 sz = static_cast<u32>(blob.size());
-    payload.push_back(static_cast<u8>(sz));
-    payload.push_back(static_cast<u8>(sz >> 8));
-    payload.push_back(static_cast<u8>(sz >> 16));
-    payload.push_back(static_cast<u8>(sz >> 24));
-    payload.insert(payload.end(), blob.begin(), blob.end());
-
-    return SubmitRequest(CommandType::SetClientVersion, payload);
-}
-
-u64 ShadNetClient::UnlockTrophy(const std::string& com_id, s32 trophy_id, u64 timestamp) {
-    shadnet::UnlockTrophyRequest req;
-    req.set_trophyid(trophy_id);
-    req.set_timestamp(timestamp);
-    return SubmitRequest(CommandType::UnlockTrophy,
-                         MakeComIdPayload(com_id, req.SerializeAsString()));
-}
-
-u64 ShadNetClient::SyncTrophies(const std::string& com_id,
-                                const std::vector<std::pair<s32, u64>>& local_trophies) {
-    shadnet::SyncTrophiesRequest req;
-    for (const auto& [id, ts] : local_trophies) {
-        auto* entry = req.add_trophies();
-        entry->set_trophyid(id);
-        entry->set_timestamp(ts);
-    }
-    return SubmitRequest(CommandType::SyncTrophies,
-                         MakeComIdPayload(com_id, req.SerializeAsString()));
-}
-
-bool ShadNetClient::IsTrophiesEnabled() const {
-    return m_trophies_enabled.load();
-}
-
 bool ShadNetClient::RequestServerFeatures() {
     const u64 pkt_id = m_pkt_counter.fetch_add(1);
     std::vector<u8> empty_payload;
@@ -787,7 +698,6 @@ void ShadNetClient::HandleGetTokenReply(const std::vector<u8>& payload) {
 
 void ShadNetClient::HandleServerFeaturesReply(const std::vector<u8>& payload) {
     bool matching2_enabled = false;
-    bool trophies_enabled = false;
     bool parsed = false;
 
     if (!payload.empty()) {
@@ -797,7 +707,6 @@ void ShadNetClient::HandleServerFeaturesReply(const std::vector<u8>& payload) {
             const std::string blob = ExtractBlob(payload, 1);
             if (!blob.empty() && pb.ParseFromString(blob)) {
                 matching2_enabled = pb.matching2_enabled();
-                trophies_enabled = pb.trophies_enabled();
                 parsed = true;
             }
         } else {
@@ -808,12 +717,9 @@ void ShadNetClient::HandleServerFeaturesReply(const std::vector<u8>& payload) {
     }
 
     m_matching2_enabled.store(matching2_enabled);
-    m_trophies_enabled.store(trophies_enabled);
     m_server_features_received.store(parsed);
-    ReportClientVersion();
-    LOG_INFO(ShadNet, "Server features: matching2_enabled={} trophies_enabled={}{}",
-             matching2_enabled ? "true" : "false", trophies_enabled ? "true" : "false",
-             parsed ? "" : " (defaulted)");
+    LOG_INFO(ShadNet, "Server features: matching2_enabled={}{}",
+             matching2_enabled ? "true" : "false", parsed ? "" : " (defaulted)");
     m_sem_authenticated.release();
 }
 
@@ -941,7 +847,6 @@ void ShadNetClient::HandleNotification(u16 cmd_raw, const std::vector<u8>& paylo
     case NotificationType::RoomMessage: {
         shadnet::NotifyRoomMessage pb;
         if (!pb.ParseFromString(blob)) {
-            LOG_WARNING(ShadNet, "RoomMessage parse error");
             break;
         }
         NotifyRoomMessage n;
@@ -957,8 +862,6 @@ void ShadNetClient::HandleNotification(u16 cmd_raw, const std::vector<u8>& paylo
         n.src_account_id = pb.src_account_id();
         n.src_platform = pb.src_platform();
         n.msg.assign(pb.msg().begin(), pb.msg().end());
-        LOG_DEBUG(ShadNet, "RoomMessage room_id={} src={} event={:#x} bytes={}", n.room_id,
-                  n.src_member_id, n.event, n.msg.size());
         if (onRoomMessage)
             onRoomMessage(n);
         break;
@@ -990,31 +893,20 @@ void ShadNetClient::HandleNotification(u16 cmd_raw, const std::vector<u8>& paylo
         if (off + 4 <= static_cast<int>(payload.size())) {
             const u32 count = GetLE32(payload.data() + off);
             off += 4;
-            bool extd_complete = count <= 256;
             for (u32 i = 0; i < count && i < 256; ++i) {
-                if (off + 4 > static_cast<int>(payload.size())) {
-                    extd_complete = false;
+                if (off + 4 > static_cast<int>(payload.size()))
                     break;
-                }
                 std::string key = ExtractBlob(payload, off);
                 off += 4 + static_cast<int>(key.size());
-                if (off + 4 > static_cast<int>(payload.size())) {
-                    extd_complete = false;
+                if (off + 4 > static_cast<int>(payload.size()))
                     break;
-                }
                 std::string val = ExtractBlob(payload, off);
                 off += 4 + static_cast<int>(val.size());
                 n.extdData.emplace_back(std::move(key), std::move(val));
             }
-            if (extd_complete && off + 16 <= static_cast<int>(payload.size())) {
-                n.fromAccountId = GetLE64(payload.data() + off);
-                n.toAccountId = GetLE64(payload.data() + off + 8);
-            }
         }
-        LOG_INFO(ShadNet,
-                 "WebApiPushEvent svc='{}' type='{}' from='{}'({}) to='{}'({}) bytes={} extd={}",
-                 n.npServiceName, n.dataType, n.fromNpid, n.fromAccountId, n.toNpid, n.toAccountId,
-                 n.data.size(), n.extdData.size());
+        LOG_INFO(ShadNet, "WebApiPushEvent svc='{}' type='{}' from='{}' bytes={} extd={}",
+                 n.npServiceName, n.dataType, n.fromNpid, n.data.size(), n.extdData.size());
         if (onWebApiPushEvent)
             onWebApiPushEvent(n);
         break;

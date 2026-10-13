@@ -86,10 +86,6 @@ public:
         return result;
     }
 
-    bool supports_float64() const {
-        return supports_float64_;
-    }
-
     ~Runner();
     Runner(const Runner&) = delete;
     Runner& operator=(const Runner&) = delete;
@@ -110,7 +106,6 @@ private:
     vk::PipelineLayout      pipeline_layout_;
 
     std::uint32_t max_push_constant_size_ = 128;
-    bool supports_float64_ = false;
 };
 
 } // namespace gcn_test

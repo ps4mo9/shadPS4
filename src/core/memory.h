@@ -154,20 +154,6 @@ struct VirtualMemoryArea {
 
         return true;
     }
-
-    void ForEachPhysArea(u64 offset, u64 size, auto&& func) {
-        if (size == 0) {
-            return;
-        }
-        const u64 end = offset + size;
-        auto it = std::prev(phys_areas.upper_bound(offset));
-        for (; it != phys_areas.end() && it->first < end; ++it) {
-            const auto& pma = it->second;
-            const u64 clip_start = std::max<u64>(it->first, offset);
-            const u64 clip_end = std::min<u64>(it->first + pma.size, end);
-            func(pma.base + (clip_start - it->first), clip_end - clip_start);
-        }
-    }
 };
 
 class MemoryManager {
@@ -247,6 +233,10 @@ public:
         // If we reach this point and size to validate is not positive, then this mapping is valid.
         return size_to_validate <= 0;
     }
+
+    // Returns whether addr falls inside a valid (non-free) guest mapping. Rejects addresses
+    // outside the PS4 guest range upfront, then does a thread-safe VMA lookup.
+    bool IsAddressMapped(VAddr addr);
 
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
 

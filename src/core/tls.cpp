@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <mutex>
@@ -61,7 +61,7 @@ Tcb* GetTcbBase() {
 asm(".zerofill TCB_SPACE,TCB_SPACE,__tcb_space,0x3FC000");
 
 struct LdtPage {
-    Tcb tcb;
+    void* tcb;
     u16 index;
 };
 
@@ -100,12 +100,8 @@ void SetTcbBase(void* image_address) {
 
     auto* ldt_page = static_cast<LdtPage*>(pthread_getspecific(ldt_page_slot));
     if (ldt_page != nullptr) {
-        // Update TCB in existing page.
-        if (image_address != nullptr) {
-            std::memcpy(&ldt_page->tcb, image_address, sizeof(Tcb));
-        } else {
-            std::memset(&ldt_page->tcb, 0, sizeof(Tcb));
-        }
+        // Update TCB pointer in existing page.
+        ldt_page->tcb = image_address;
         return;
     }
 
@@ -147,13 +143,9 @@ void SetTcbBase(void* image_address) {
     };
     asm volatile("mov %0, %%fs" ::"r"(new_selector));
 
-    // Store the TCB structure and index in the created LDT area.
+    // Store the TCB base pointer and index in the created LDT area.
     ldt_page = reinterpret_cast<LdtPage*>(addr);
-    if (image_address != nullptr) {
-        std::memcpy(&ldt_page->tcb, image_address, sizeof(Tcb));
-    } else {
-        std::memset(&ldt_page->tcb, 0, sizeof(Tcb));
-    }
+    ldt_page->tcb = image_address;
     ldt_page->index = ldt_index;
 
     ASSERT_MSG(pthread_setspecific(ldt_page_slot, ldt_page) == 0,

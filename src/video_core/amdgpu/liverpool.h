@@ -60,7 +60,6 @@ struct Liverpool {
     };
 
     Regs regs{};
-    u32 index_buffer_num_indices{};
     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
     CbDbExtent last_db_extent{};
 
@@ -98,6 +97,9 @@ public:
 
     template <bool wait_done = false>
     void SendCommand(auto&& func) {
+        if (std::this_thread::get_id() == gpu_id) {
+            return func();
+        }
         if constexpr (wait_done) {
             std::binary_semaphore sem{0};
             {
@@ -139,17 +141,7 @@ public:
         std::array<u32, Pm4BufferSize> tmp_packet;
         u32 tmp_dwords;
     };
-    Common::SlotVector<AscQueueInfo> asc_queues{64};
-
-    std::thread::id GetGpuCommandProcessorThread() {
-        return gpu_id;
-    }
-
-#ifdef __linux__
-    u32 GetGpuCommandProcessorThreadId() {
-        return gpu_tid;
-    }
-#endif
+    Common::SlotVector<AscQueueInfo> asc_queues{};
 
 private:
     struct Task {
@@ -230,7 +222,6 @@ private:
 
     Vulkan::Rasterizer* rasterizer{};
     Libraries::VideoOut::VideoOutPort* vo_port{};
-    const bool guest_markers_enabled;
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
     std::atomic<u32> num_commands{};
@@ -239,9 +230,6 @@ private:
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     std::thread::id gpu_id;
-#ifdef __linux__
-    u32 gpu_tid;
-#endif
     s32 curr_qid{-1};
 };
 
