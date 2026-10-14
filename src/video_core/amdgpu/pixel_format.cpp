@@ -3,6 +3,7 @@
 
 #include <array>
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "video_core/amdgpu/pixel_format.h"
 
 namespace AmdGpu {
@@ -160,7 +161,12 @@ static constexpr std::array NUM_COMPONENTS = {
 
 u32 NumComponents(DataFormat format) {
     const u32 index = static_cast<u32>(format);
-    ASSERT_MSG(index < NUM_COMPONENTS.size(), "Invalid data format = {}", format);
+    if (index >= NUM_COMPONENTS.size()) {
+        // Descriptors can carry garbage formats (e.g. a shader reading metadata as a
+        // texture). Size it like RGBA8 instead of aborting the emulator.
+        LOG_WARNING(Render, "NumComponents: unknown data format {}, using 4", index);
+        return 4;
+    }
     return NUM_COMPONENTS[index];
 }
 
@@ -211,7 +217,10 @@ static constexpr std::array BITS_PER_BLOCK = {
 
 u32 NumBitsPerBlock(DataFormat format) {
     const u32 index = static_cast<u32>(format);
-    ASSERT_MSG(index < BITS_PER_BLOCK.size(), "Invalid data format = {}", format);
+    if (index >= BITS_PER_BLOCK.size()) {
+        LOG_WARNING(Render, "NumBitsPerBlock: unknown data format {}, using 32", index);
+        return 32;
+    }
     return BITS_PER_BLOCK[index];
 }
 
@@ -262,7 +271,10 @@ static constexpr std::array BITS_PER_ELEMENT = {
 
 u32 NumBitsPerElement(DataFormat format) {
     const u32 index = static_cast<u32>(format);
-    ASSERT_MSG(index < BITS_PER_ELEMENT.size(), "Invalid data format = {}", format);
+    if (index >= BITS_PER_ELEMENT.size()) {
+        LOG_WARNING(Render, "NumBitsPerElement: unknown data format {}, using 8", index);
+        return 8;
+    }
     return BITS_PER_ELEMENT[index];
 }
 
