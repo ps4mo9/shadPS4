@@ -421,7 +421,11 @@ vk::ComponentSwizzle ComponentSwizzle(AmdGpu::CompSwizzle comp_swizzle) {
     case AmdGpu::CompSwizzle::Alpha:
         return vk::ComponentSwizzle::eA;
     default:
-        UNREACHABLE();
+        // Reserved/garbage swizzles (18-23) reach here from descriptors of this title.
+        // Identity is the safe mapping and keeps the emulator alive.
+        LOG_WARNING(Render_Vulkan, "Unknown component swizzle {}, using identity",
+                     static_cast<u32>(comp_swizzle));
+        return vk::ComponentSwizzle::eIdentity;
     }
 }
 
