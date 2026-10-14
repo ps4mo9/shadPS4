@@ -74,7 +74,9 @@ std::string_view NameOf(DataFormat fmt) {
     case DataFormat::FormatBc7:
         return "FormatBc7";
     default:
-        UNREACHABLE();
+        // Descriptors can carry garbage; naming is used in logs, so return something printable
+        // instead of aborting the emulator.
+        return "FormatUnknown";
     }
 }
 
@@ -107,7 +109,7 @@ std::string_view NameOf(NumberFormat fmt) {
     case NumberFormat::Ubscaled:
         return "Unscaled";
     default:
-        UNREACHABLE();
+        return "NumberFormatUnknown";
     }
 }
 
