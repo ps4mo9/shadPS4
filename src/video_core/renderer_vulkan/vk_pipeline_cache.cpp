@@ -312,6 +312,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
     WarmUp();
+    async_shaders = std::make_unique<AsyncShaderCache>(profile);
 
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
@@ -644,8 +645,19 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
-    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    std::optional<std::vector<u32>> background;
+    if (async_shaders) {
+        background = async_shaders->TryGetSpv(info.pgm_hash, perm_idx, binding);
+    }
+    std::vector<u32> spv;
+    if (background) {
+        // A background worker already translated this program; reuse its SPIR-V instead of
+        // blocking the command thread with the GCN -> IR -> SPIR-V translation.
+        spv = std::move(*background);
+    } else {
+        const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+        spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    }
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
     // Generate and compile the auxiliary geometry shader for the per-vertex interpolation
@@ -702,6 +714,11 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(stage, l_stage);
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
+    if (new_program && async_shaders) {
+        // First sighting of this program anywhere: warm the background translator with the same
+        // request so the permutations that follow the first one find their SPIR-V already done.
+        async_shaders->Request(params.hash, stage, l_stage, params, runtime_info, binding);
+    }
     if (new_program) {
         it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
         auto& program = it_pgm.value();

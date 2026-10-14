@@ -3,11 +3,13 @@
 
 #pragma once
 
+#include <memory>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/specialization.h"
+#include "video_core/renderer_vulkan/async_shader_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -123,6 +125,9 @@ private:
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
     Shader::Pools pools;
+    // Background GCN->SPIR-V translations (see async_shader_cache.h); speeds up the first
+    // encounter of every streamed shader by keeping the command thread free of translation.
+    std::unique_ptr<AsyncShaderCache> async_shaders;
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
