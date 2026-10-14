@@ -16,6 +16,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_compile_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -644,8 +645,17 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
-    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    std::vector<u32> spv;
+    {
+        // Phase timing: separates emulator-side work (GCN->IR->SPIR-V) from driver-side shader
+        // module compilation, to know which phase stalls the command thread.
+        Vulkan::CompileStats::ScopedTimer translate_timer{Vulkan::CompileStats::translate_ns,
+                                                          &Vulkan::CompileStats::translate_count};
+        const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+        Vulkan::CompileStats::ScopedTimer emit_timer{Vulkan::CompileStats::emit_ns};
+        spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    }
+    Vulkan::CompileStats::MaybeLog();
     DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
 
     // Generate and compile the auxiliary geometry shader for the per-vertex interpolation
@@ -676,15 +686,19 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     }
 
     vk::ShaderModule module;
-
-    auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
-    const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
-    if (is_patched) {
-        LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage, info.pgm_hash);
-        module = CompileSPV(*patch, instance.GetDevice());
-    } else {
-        module = CompileSPV(spv, instance.GetDevice());
+    {
+        Vulkan::CompileStats::ScopedTimer module_timer{Vulkan::CompileStats::shader_module_ns,
+                                                       &Vulkan::CompileStats::shader_module_count};
+        auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
+        const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
+        if (is_patched) {
+            LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage, info.pgm_hash);
+            module = CompileSPV(*patch, instance.GetDevice());
+        } else {
+            module = CompileSPV(spv, instance.GetDevice());
+        }
     }
+    Vulkan::CompileStats::MaybeLog();
 
     RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 

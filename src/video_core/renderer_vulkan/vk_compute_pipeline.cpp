@@ -5,6 +5,7 @@
 
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
+#include "video_core/renderer_vulkan/vk_compile_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -108,6 +109,8 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .layout = *pipeline_layout,
     };
     auto [pipeline_result, pipe] =
+        Vulkan::CompileStats::ScopedTimer cs_timer{Vulkan::CompileStats::compute_pipeline_ns,
+                                                   &Vulkan::CompileStats::compute_pipeline_count};
         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
                vk::to_string(pipeline_result));

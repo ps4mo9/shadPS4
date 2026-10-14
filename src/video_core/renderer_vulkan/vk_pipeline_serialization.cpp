@@ -6,6 +6,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
+#include "video_core/renderer_vulkan/vk_compile_stats.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -325,6 +326,7 @@ void PipelineCache::WarmUp() {
         return;
     }
 
+    const auto preload_start = CompileStats::Clock::now();
     Storage::DataBase::Instance().Open();
 
     // Check if cache is compatible
@@ -387,7 +389,9 @@ void PipelineCache::WarmUp() {
             }
         });
 
+    CompileStats::preload_ns.store(CompileStats::Since(preload_start));
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
+    CompileStats::MaybeLog();
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);
