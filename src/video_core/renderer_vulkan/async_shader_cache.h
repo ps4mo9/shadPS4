@@ -7,7 +7,6 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
-#include <optional>
 #include <unordered_set>
 #include <thread>
 #include <unordered_map>
@@ -111,7 +110,7 @@ private:
 
     void WorkerLoop() {
         while (true) {
-            std::optional<Job> job;
+            Job job;
             {
                 std::unique_lock lk{queue_mutex};
                 queue_cv.wait(lk, [this] { return stopping || !queue.empty(); });
@@ -121,7 +120,7 @@ private:
                 job = std::move(queue.front());
                 queue.pop_front();
             }
-            Translate(*job);
+            Translate(job);
         }
     }
 
@@ -129,13 +128,11 @@ private:
         try {
             // Worker-local pools; nothing shared with other translations.
             Shader::Pools pools;
-            auto runtime_info = job.runtime_info;
-            auto binding = job.binding;
             auto info = Shader::Info(job.stage, job.l_stage, job.params);
             const auto ir_program =
-                Shader::TranslateProgram(job.params.code, pools, info, runtime_info, profile);
-            auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program,
-                                                        binding);
+                Shader::TranslateProgram(job.params.code, pools, info, job.runtime_info, profile);
+            auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, job.runtime_info, ir_program,
+                                                        job.binding);
             {
                 std::scoped_lock r{result_mutex};
                 results[MakeKey(job.program_hash, 0)] = {job.binding, std::move(spv)};
