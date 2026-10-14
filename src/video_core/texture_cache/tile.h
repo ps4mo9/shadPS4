@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
+#include <bit>
+#include <cmath>
+
 #include "common/assert.h"
 #include "common/types.h"
 
@@ -290,11 +294,21 @@ constexpr std::pair micro_tile_extent{8u, 8u};
 constexpr auto hw_pipe_interleave = 256u;
 
 constexpr std::pair<u32, u32> GetMacroTileExtents(AmdGpu::TileMode tile_mode, u32 bpp,
-                                                  u32 num_samples, bool alt) {
-    ASSERT(num_samples <= 8);
-    const auto samples_log = static_cast<u32>(std::log2(num_samples));
-    const auto row = u32(tile_mode) * 5;
-    const auto column = std::bit_width(bpp) - 4; // bpps are 8, 16, 32, 64, 128
+                                                  u32 num_samples_, bool alt) {
+    // Garbage formats reach here with out-of-range bpp/samples (see the size helpers); clamp
+    // everything into the table's domain instead of asserting. Reserved tile modes (>= 26)
+    // and odd bpp values use the nearest sane entry.
+    u32 num_samples = num_samples_ == 0 ? 1 : num_samples_;
+    for (u32 candidate = 8; candidate >= 1; candidate >>= 1) {
+        if (num_samples >= candidate) {
+            num_samples = candidate;
+            break;
+        }
+    }
+    const u32 clamped_bpp = bpp < 8 ? 8u : (bpp > 128 ? 128u : std::bit_floor(bpp));
+    const auto samples_log = static_cast<u32>(std::countr_zero(num_samples));
+    const auto row = std::min<u32>(u32(tile_mode), 25) * 5;
+    const auto column = std::clamp<u32>(std::bit_width(clamped_bpp) - 4, 0, 4);
     return (alt ? macro_tile_extents_alt : macro_tile_extents)[samples_log][row + column];
 }
 
