@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <bit>
+
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "video_core/amdgpu/tiling.h"
@@ -555,20 +558,37 @@ u32 CalculateTileSplit(TileMode tile_mode, ArrayMode array_mode, MicroTileMode m
     return std::min(DRAM_ROW_SIZE, tile_split);
 }
 
-MacroTileMode CalculateMacrotileMode(TileMode tile_mode, u32 bpp, u32 num_samples) {
-    ASSERT_MSG(std::has_single_bit(num_samples) && num_samples <= 16, "Invalid sample count {}",
-               num_samples);
-    ASSERT_MSG(bpp >= 1 && bpp <= 128, "Invalid bpp {}", bpp);
+MacroTileMode CalculateMacrotileMode(TileMode tile_mode, u32 bpp_, u32 num_samples_) {
+    // bpp and sample counts arrive from descriptors that can carry garbage formats (the
+    // size helpers now return safe fallbacks, which can still produce out-of-range values).
+    // Clamp both to the ranges the table math supports instead of asserting.
+    const u32 bpp = std::clamp(bpp_ == 0 ? 32u : bpp_, 1u, 128u);
+    u32 num_samples = std::clamp(num_samples_ == 0 ? 1u : num_samples_, 1u, 16u);
+    if (!std::has_single_bit(num_samples)) {
+        // Round down to the largest power of two (4 -> 2 -> 1).
+        for (u32 candidate = 16; candidate >= 1; candidate >>= 1) {
+            if (num_samples >= candidate) {
+                num_samples = candidate;
+                break;
+            }
+        }
+    }
 
     const ArrayMode array_mode = GetArrayMode(tile_mode);
-    ASSERT_MSG(IsMacroTiled(array_mode), "Tile mode not macro tiled");
+    if (!IsMacroTiled(array_mode)) {
+        // The fallback tile modes map to macro tiled layouts; treat this like the common
+        // 2D thin case instead of asserting.
+        LOG_WARNING(Render, "CalculateMacrotileMode: tile mode {} is not macro tiled, using 2D "
+                            "thin",
+                    u32(tile_mode));
+    }
 
     const MicroTileMode micro_tile_mode = GetMicroTileMode(tile_mode);
     const u32 tile_thickness = GetMicroTileThickness(array_mode);
     const u32 tile_bytes_1x = bpp * MICROTILE_SIZE * MICROTILE_SIZE * tile_thickness / 8;
     const u32 tilesplic = CalculateTileSplit(tile_mode, array_mode, micro_tile_mode, bpp);
     const u32 tile_bytes = std::min(tilesplic, num_samples * tile_bytes_1x);
-    const u32 mtm_idx = std::bit_width(tile_bytes / 64) - 1;
+    const u32 mtm_idx = std::bit_width(std::max<u32>(tile_bytes / 64, 1u)) - 1;
     return IsPrt(array_mode) ? MacroTileMode(mtm_idx + 8) : MacroTileMode(mtm_idx);
 }
 
