@@ -685,12 +685,12 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         }
     }
 
+    auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
+    const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
     vk::ShaderModule module;
     {
         Vulkan::CompileStats::ScopedTimer module_timer{Vulkan::CompileStats::shader_module_ns,
                                                        &Vulkan::CompileStats::shader_module_count};
-        auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
-        const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
         if (is_patched) {
             LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage, info.pgm_hash);
             module = CompileSPV(*patch, instance.GetDevice());

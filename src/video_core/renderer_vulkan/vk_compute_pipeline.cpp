@@ -108,10 +108,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .stage = shader_ci,
         .layout = *pipeline_layout,
     };
+    Vulkan::CompileStats::ScopedTimer cs_timer{Vulkan::CompileStats::compute_pipeline_ns,
+                                               &Vulkan::CompileStats::compute_pipeline_count};
     auto [pipeline_result, pipe] =
-        Vulkan::CompileStats::ScopedTimer cs_timer{Vulkan::CompileStats::compute_pipeline_ns,
-                                                   &Vulkan::CompileStats::compute_pipeline_count};
         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+    Vulkan::CompileStats::MaybeLog();
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
