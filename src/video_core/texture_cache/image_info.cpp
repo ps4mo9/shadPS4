@@ -12,6 +12,8 @@
 
 #include <magic_enum/magic_enum.hpp>
 
+#include "common/logging/log.h"
+
 namespace VideoCore {
 
 using namespace Vulkan;
@@ -189,17 +191,28 @@ void ImageInfo::UpdateSize() {
             break;
         }
         case AmdGpu::ArrayMode::Array2DTiledThick:
+        case AmdGpu::ArrayMode::ArrayPrtTiledThick:
+        case AmdGpu::ArrayMode::ArrayPrt2DTiledThick:
             thickness = 4;
             mip_d += (-mip_d) & (thickness - 1);
             [[fallthrough]];
-        case AmdGpu::ArrayMode::Array2DTiledThin1: {
+        case AmdGpu::ArrayMode::Array2DTiledThin1:
+        case AmdGpu::ArrayMode::ArrayPrtTiledThin1:
+        case AmdGpu::ArrayMode::ArrayPrt2DTiledThin1: {
             ASSERT(!props.is_block);
             std::tie(mip_info.pitch, mip_info.height, mip_info.size) = ImageSizeMacroTiled(
                 mip_w, mip_h, thickness, num_bits, num_samples, tile_mode, mip, alt_tile);
             break;
         }
         default: {
-            UNREACHABLE_MSG("Unknown array mode {}", magic_enum::enum_name(array_mode));
+            // Rare modes (3D/PRT variants, garbage from the title): size them like the nearest
+            // plain tiled layout instead of aborting - the title keeps issuing them with
+            // streaming textures during loads.
+            LOG_WARNING(Render_Vulkan, "Unusual array mode {} for image, sizing as 2D tiled thin",
+                        magic_enum::enum_name(array_mode));
+            std::tie(mip_info.pitch, mip_info.height, mip_info.size) = ImageSizeMacroTiled(
+                mip_w, mip_h, 1, num_bits, num_samples, tile_mode, mip, alt_tile);
+            break;
         }
         }
         if (props.is_block) {
