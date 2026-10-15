@@ -331,7 +331,7 @@ PipelineCache::~PipelineCache() {
     }
 }
 
-void PipelineCache::QueuePipelineCreate(GraphicsPipeline* pipeline) {
+void PipelineCache::QueuePipelineCreate(Pipeline* pipeline) {
     if (!create_thread.joinable()) {
         auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
         ASSERT_MSG(cache_result == vk::Result::eSuccess,
@@ -350,7 +350,7 @@ void PipelineCache::QueuePipelineCreate(GraphicsPipeline* pipeline) {
 void PipelineCache::PipelineCreateWorker() {
     Common::SetCurrentThreadName("shadPS4:AsyncPipeline");
     while (true) {
-        GraphicsPipeline* pipeline = nullptr;
+        Pipeline* pipeline = nullptr;
         std::chrono::steady_clock::time_point queued_at{};
         {
             std::unique_lock lock{create_mutex};
@@ -463,10 +463,14 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
+        // Offload the driver's pipeline compilation to the compile worker (see
+        // GetGraphicsPipeline); until it finishes, dispatches that need this state are skipped.
+        const bool defer_creation = EmulatorSettings.IsAsyncPipelineCompilation();
+
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
-                                                       modules[0], sdata, false);
+                                                       modules[0], sdata, false, defer_creation);
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
@@ -474,8 +478,17 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
             auto& m = modules[0];
             module_related_pipelines[m].emplace_back(compute_key);
         }
+
+        if (defer_creation) {
+            QueuePipelineCreate(it.value().get());
+        }
     }
-    return it->second.get();
+    ComputePipeline* pipeline = it->second.get();
+    if (!pipeline->IsReady()) {
+        // Still compiling on the worker (or creation failed): skip this dispatch for now.
+        return nullptr;
+    }
+    return pipeline;
 }
 
 bool PipelineCache::RefreshGraphicsKey() {

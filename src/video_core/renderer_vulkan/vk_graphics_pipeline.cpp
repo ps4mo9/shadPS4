@@ -442,11 +442,11 @@ void GraphicsPipeline::CompleteCreate(vk::PipelineCache pipeline_cache) {
     if (pipeline_result == vk::Result::eSuccess) {
         pipeline = std::move(pipe);
         SetObjectName(device, *pipeline, "Graphics Pipeline {}", create_data->debug_str);
-        create_state.store(CreateState::Ready, std::memory_order_release);
+        SetCreateState(CreateState::Ready);
     } else {
         LOG_CRITICAL(Render_Vulkan, "Failed to create graphics pipeline: {}",
                      vk::to_string(pipeline_result));
-        create_state.store(CreateState::Failed, std::memory_order_release);
+        SetCreateState(CreateState::Failed);
     }
     create_data.reset();
 }

@@ -101,15 +101,8 @@ public:
                      bool preloading, bool defer_creation = false);
     ~GraphicsPipeline();
 
-    /// Completes the driver pipeline creation when construction was deferred. Invoked on the
-    /// pipeline-compile worker thread for deferred pipelines and inline at the end of the
-    /// constructor otherwise. Must be called exactly once.
-    void CompleteCreate(vk::PipelineCache pipeline_cache);
-
-    /// True once the driver pipeline exists and the pipeline may be used for draws.
-    bool IsReady() const noexcept {
-        return create_state.load(std::memory_order_acquire) == CreateState::Ready;
-    }
+    /// Completes the driver pipeline creation when construction was deferred (see PipelineCache).
+    void CompleteCreate(vk::PipelineCache pipeline_cache) override;
 
     const std::optional<const Shader::Gcn::FetchShaderData>& GetFetchShader() const noexcept {
         return fetch_shader;
@@ -130,12 +123,6 @@ private:
     void BuildDescSetLayout(bool preloading);
 
 private:
-    enum class CreateState : u32 {
-        Pending, ///< Deferred driver creation has not finished yet; the pipeline is unusable.
-        Ready,   ///< The pipeline handle is valid.
-        Failed,  ///< vkCreateGraphicsPipelines failed; draws using this state are skipped.
-    };
-
     /// Owns every structure vk::GraphicsPipelineCreateInfo references. The object is allocated
     /// once and never moved, so the internal pNext/pointer links stay valid even though the
     /// driver call may happen after the constructor returned (deferred creation).
@@ -144,7 +131,6 @@ private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     std::unique_ptr<CreateData> create_data{};
-    std::atomic<CreateState> create_state{CreateState::Pending};
 };
 
 struct ClipDistanceShaderKey {

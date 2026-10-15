@@ -3,6 +3,8 @@
 
 #include <boost/container/small_vector.hpp>
 
+#include "common/assert.h"
+#include "common/logging/log.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_compile_stats.h"
@@ -11,22 +13,33 @@
 
 namespace Vulkan {
 
+// Owns the structures that vk::ComputePipelineCreateInfo references, so the driver call can run
+// after the constructor returned (deferred creation) without dangling pointers.
+struct ComputePipeline::CreateData {
+    vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci{};
+    vk::PipelineShaderStageCreateInfo shader_ci{};
+    vk::ComputePipelineCreateInfo pipeline_info{};
+    std::string debug_str{};
+};
+
 ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
                                  DescriptorHeap& desc_heap, const Shader::Profile& profile,
                                  vk::PipelineCache pipeline_cache, ComputePipelineKey compute_key_,
                                  const Shader::Info& info_, vk::ShaderModule module,
-                                 SerializationSupport& sdata, bool preloading /*=false*/)
+                                 SerializationSupport& sdata, bool preloading /*=false*/,
+                                 bool defer_creation /*=false*/)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache, true},
-      compute_key{compute_key_} {
+      compute_key{compute_key_}, create_data{std::make_unique<CreateData>()} {
+    auto& cd = *create_data;
     auto& info = stages[int(Shader::LogicalStage::Compute)];
     info = &info_;
     const auto debug_str = GetDebugString();
 
-    const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
+    cd.subgroup_size_ci = {
         .requiredSubgroupSize = 64,
     };
-    const vk::PipelineShaderStageCreateInfo shader_ci = {
-        .pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
+    cd.shader_ci = {
+        .pNext = instance.IsSubgroupSize64Supported() ? &cd.subgroup_size_ci : nullptr,
         .stage = vk::ShaderStageFlagBits::eCompute,
         .module = module,
         .pName = "main",
@@ -104,19 +117,40 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     pipeline_layout = std::move(layout);
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
-    const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .stage = shader_ci,
+    cd.pipeline_info = {
+        .stage = cd.shader_ci,
         .layout = *pipeline_layout,
     };
+    cd.debug_str = debug_str;
+
+    if (defer_creation) {
+        // The driver call is left to the pipeline-compile worker (see PipelineCache); dispatches
+        // using this pipeline are skipped until IsReady() becomes true.
+        return;
+    }
+    CompleteCreate(pipeline_cache);
+}
+
+void ComputePipeline::CompleteCreate(vk::PipelineCache pipeline_cache) {
+    ASSERT(create_data != nullptr);
+
+    const vk::Device device = instance.GetDevice();
     Vulkan::CompileStats::ScopedTimer cs_timer{Vulkan::CompileStats::compute_pipeline_ns,
                                                &Vulkan::CompileStats::compute_pipeline_count};
     auto [pipeline_result, pipe] =
-        instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+        device.createComputePipelineUnique(pipeline_cache, create_data->pipeline_info);
     Vulkan::CompileStats::MaybeLog();
-    ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
-               vk::to_string(pipeline_result));
-    pipeline = std::move(pipe);
-    SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+
+    if (pipeline_result == vk::Result::eSuccess) {
+        pipeline = std::move(pipe);
+        SetObjectName(device, *pipeline, "Compute Pipeline {}", create_data->debug_str);
+        SetCreateState(CreateState::Ready);
+    } else {
+        LOG_CRITICAL(Render_Vulkan, "Failed to create compute pipeline: {}",
+                     vk::to_string(pipeline_result));
+        SetCreateState(CreateState::Failed);
+    }
+    create_data.reset();
 }
 
 ComputePipeline::~ComputePipeline() = default;
