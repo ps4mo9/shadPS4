@@ -6,6 +6,7 @@
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -320,7 +321,68 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 }
 
-PipelineCache::~PipelineCache() = default;
+PipelineCache::~PipelineCache() {
+    // Join the compile worker before any member (pipeline maps, caches) is destroyed: it may be
+    // in the middle of a driver call on a GraphicsPipeline owned by this object.
+    if (create_thread.joinable()) {
+        create_stop.store(true);
+        create_cv.notify_all();
+        create_thread.join();
+    }
+}
+
+void PipelineCache::QueuePipelineCreate(GraphicsPipeline* pipeline) {
+    if (!create_thread.joinable()) {
+        auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
+        ASSERT_MSG(cache_result == vk::Result::eSuccess,
+                   "Failed to create async pipeline cache: {}", vk::to_string(cache_result));
+        create_pipeline_cache = std::move(cache);
+        create_stop.store(false);
+        create_thread = std::thread{[this] { PipelineCreateWorker(); }};
+    }
+    {
+        std::scoped_lock lock{create_mutex};
+        create_queue.emplace_back(pipeline, std::chrono::steady_clock::now());
+    }
+    create_cv.notify_one();
+}
+
+void PipelineCache::PipelineCreateWorker() {
+    Common::SetCurrentThreadName("shadPS4:AsyncPipeline");
+    while (true) {
+        GraphicsPipeline* pipeline = nullptr;
+        std::chrono::steady_clock::time_point queued_at{};
+        {
+            std::unique_lock lock{create_mutex};
+            create_cv.wait(lock, [this] { return create_stop.load() || !create_queue.empty(); });
+            if (create_stop.load()) {
+                return;
+            }
+            pipeline = create_queue.front().first;
+            queued_at = create_queue.front().second;
+            create_queue.pop_front();
+            create_busy.store(true);
+        }
+        pipeline->CompleteCreate(*create_pipeline_cache);
+        const auto elapsed = std::chrono::steady_clock::now() - queued_at;
+        LOG_INFO(Render_Vulkan, "Async graphics pipeline ready in {:.0f} ms",
+                 std::chrono::duration<double, std::milli>(elapsed).count());
+        {
+            std::scoped_lock lock{create_mutex};
+            create_busy.store(false);
+        }
+        create_done_cv.notify_all();
+    }
+}
+
+void PipelineCache::FlushPipelineCreates() {
+    if (!create_thread.joinable()) {
+        return;
+    }
+    std::unique_lock lock{create_mutex};
+    create_done_cv.wait(lock,
+                        [this] { return create_queue.empty() && !create_busy.load(); });
+}
 
 void PipelineCache::FillAuxGSModule() {
     // Fill the Geometry slot with the FS's companion auxiliary GS (per-vertex expansion)
@@ -356,10 +418,16 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
 
+        // A brand-new shader state costs hundreds of milliseconds in the driver on the command
+        // thread, which used to stall the whole GPU command stream (visible as freezes). Offload
+        // the driver call to the compile worker; until it finishes, draws that need this state
+        // are skipped below.
+        const bool defer_creation = EmulatorSettings.IsAsyncPipelineCompilation();
+
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-            runtime_infos, fetch_shader, modules, sdata, false);
+            runtime_infos, fetch_shader, modules, sdata, false, defer_creation);
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -373,8 +441,17 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
             }
         }
         fetch_shader.reset();
+
+        if (defer_creation) {
+            QueuePipelineCreate(it.value().get());
+        }
     }
-    return it->second.get();
+    GraphicsPipeline* pipeline = it->second.get();
+    if (!pipeline->IsReady()) {
+        // Still compiling on the worker (or creation failed): skip this draw for now.
+        return nullptr;
+    }
+    return pipeline;
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
@@ -782,6 +859,8 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
         }
     }
     if (module_related_pipelines.contains(module)) {
+        // Pipelines about to be erased must not be referenced by the compile worker anymore.
+        FlushPipelineCreates();
         auto& pipeline_keys = module_related_pipelines[module];
         for (auto& key : pipeline_keys) {
             if (std::holds_alternative<GraphicsPipelineKey>(key)) {

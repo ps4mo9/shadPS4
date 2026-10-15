@@ -3,6 +3,12 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -110,6 +116,12 @@ private:
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::Stage stage, Shader::LogicalStage l_stage);
     void FillAuxGSModule();
 
+    /// Hands a pipeline with deferred creation to the compile worker, starting it on first use.
+    void QueuePipelineCreate(GraphicsPipeline* pipeline);
+    void PipelineCreateWorker();
+    /// Blocks until the compile worker is idle, so no raw pipeline pointer is held by it.
+    void FlushPipelineCreates();
+
     [[nodiscard]] bool IsPipelineCacheDirty() const {
         return num_new_pipelines > 0;
     }
@@ -142,6 +154,20 @@ private:
     tsl::robin_map<vk::ShaderModule,
                    std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
         module_related_pipelines;
+
+    // Asynchronous graphics pipeline creation: the driver compilation of a state first seen at
+    // draw time runs on a worker thread so the GPU command thread is not stalled by it. While a
+    // pipeline is being compiled, draws that need it are skipped (GetGraphicsPipeline returns
+    // nullptr). The worker uses its own VkPipelineCache because Vulkan requires host
+    // synchronization per cache object.
+    std::mutex create_mutex;
+    std::condition_variable create_cv;
+    std::condition_variable create_done_cv;
+    std::deque<std::pair<GraphicsPipeline*, std::chrono::steady_clock::time_point>> create_queue;
+    std::thread create_thread;
+    std::atomic<bool> create_stop{false};
+    std::atomic<bool> create_busy{false};
+    vk::UniquePipelineCache create_pipeline_cache;
 };
 
 } // namespace Vulkan
