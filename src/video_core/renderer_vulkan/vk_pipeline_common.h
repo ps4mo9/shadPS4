@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include <atomic>
-
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -59,16 +57,6 @@ public:
         return is_compute;
     }
 
-    /// Completes the driver pipeline creation when construction was deferred. Runs on the
-    /// pipeline-compile worker thread for deferred pipelines and inline at the end of the
-    /// constructor otherwise. Must be called exactly once.
-    virtual void CompleteCreate(vk::PipelineCache pipeline_cache) = 0;
-
-    /// True once the driver pipeline exists and may be used.
-    bool IsReady() const noexcept {
-        return create_state.load(std::memory_order_acquire) == CreateState::Ready;
-    }
-
     using DescriptorWrites = std::vector<vk::WriteDescriptorSet>;
     using BufferBarriers = boost::container::small_vector<vk::BufferMemoryBarrier2, 16>;
 
@@ -78,16 +66,6 @@ public:
 protected:
     [[nodiscard]] std::string GetDebugString() const;
 
-    enum class CreateState : u32 {
-        Pending, ///< Deferred driver creation has not finished yet; the pipeline is unusable.
-        Ready,   ///< The pipeline handle is valid.
-        Failed,  ///< Driver creation failed; work using this state is skipped.
-    };
-
-    void SetCreateState(CreateState state) noexcept {
-        create_state.store(state, std::memory_order_release);
-    }
-
     const Instance& instance;
     Scheduler& scheduler;
     DescriptorHeap& desc_heap;
@@ -96,7 +74,6 @@ protected:
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
-    std::atomic<CreateState> create_state{CreateState::Pending};
     bool uses_push_descriptors{};
     bool is_compute;
 };

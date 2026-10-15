@@ -117,7 +117,7 @@ private:
     void FillAuxGSModule();
 
     /// Hands a pipeline with deferred creation to the compile worker, starting it on first use.
-    void QueuePipelineCreate(Pipeline* pipeline);
+    void QueuePipelineCreate(GraphicsPipeline* pipeline);
     void PipelineCreateWorker();
     /// Blocks until the compile worker is idle, so no raw pipeline pointer is held by it.
     void FlushPipelineCreates();
@@ -155,15 +155,15 @@ private:
                    std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
         module_related_pipelines;
 
-    // Asynchronous pipeline creation: the driver compilation of a state first seen at draw or
-    // dispatch time runs on a worker thread so the GPU command thread is not stalled by it.
-    // While a pipeline is being compiled, work that needs it is skipped
-    // (GetGraphicsPipeline/GetComputePipeline return nullptr). The worker uses its own
-    // VkPipelineCache because Vulkan requires host synchronization per cache object.
+    // Asynchronous graphics pipeline creation: the driver compilation of a state first seen at
+    // draw time runs on a worker thread so the GPU command thread is not stalled by it. While a
+    // pipeline is being compiled, draws that need it are skipped (GetGraphicsPipeline returns
+    // nullptr). The worker uses its own VkPipelineCache because Vulkan requires host
+    // synchronization per cache object.
     std::mutex create_mutex;
     std::condition_variable create_cv;
     std::condition_variable create_done_cv;
-    std::deque<std::pair<Pipeline*, std::chrono::steady_clock::time_point>> create_queue;
+    std::deque<std::pair<GraphicsPipeline*, std::chrono::steady_clock::time_point>> create_queue;
     std::thread create_thread;
     std::atomic<bool> create_stop{false};
     std::atomic<bool> create_busy{false};

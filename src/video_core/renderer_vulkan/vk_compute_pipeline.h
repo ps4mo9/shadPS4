@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include <memory>
-
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
 
@@ -49,20 +47,11 @@ public:
     ComputePipeline(const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
                     const Shader::Profile& profile, vk::PipelineCache pipeline_cache,
                     ComputePipelineKey compute_key, const Shader::Info& info,
-                    vk::ShaderModule module, SerializationSupport& sdata, bool preloading,
-                    bool defer_creation = false);
+                    vk::ShaderModule module, SerializationSupport& sdata, bool preloading);
     ~ComputePipeline();
 
-    /// Completes the driver pipeline creation when construction was deferred (see PipelineCache).
-    void CompleteCreate(vk::PipelineCache pipeline_cache) override;
-
 private:
-    /// Owns the structures vk::ComputePipelineCreateInfo references, kept alive until the
-    /// deferred driver call completes (the object is never moved once allocated).
-    struct CreateData;
-
     ComputePipelineKey compute_key;
-    std::unique_ptr<CreateData> create_data{};
 };
 
 } // namespace Vulkan
